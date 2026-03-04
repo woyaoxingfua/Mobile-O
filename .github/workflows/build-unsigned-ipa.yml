@@ -22,7 +22,6 @@ jobs:
           xcodebuild -version
 
       - name: Build Unsigned App
-        # 同时指定 -sdk iphoneos 和 -destination，避免触发平台未安装的报错
         run: |
           cd Mobile-O-App/app
           xcodebuild clean build \
@@ -31,10 +30,15 @@ jobs:
             -configuration Release \
             -sdk iphoneos \
             -destination "generic/platform=iOS" \
+            -skipMacroValidation \
+            -skipPackagePluginValidation \
             CODE_SIGN_IDENTITY="" \
             CODE_SIGNING_REQUIRED="NO" \
             CODE_SIGNING_ALLOWED="NO" \
+            ENTITLEMENTS_REQUIRED="NO" \
+            CODE_SIGN_ENTITLEMENTS="" \
             IPHONEOS_DEPLOYMENT_TARGET="18.1" \
+            OTHER_SWIFT_FLAGS="-strict-concurrency=minimal" \
             CONFIGURATION_BUILD_DIR="$(pwd)/build"
 
       - name: Package into Unsigned IPA
