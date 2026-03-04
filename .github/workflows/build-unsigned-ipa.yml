@@ -1,197 +1,59 @@
-name: Build Unsigned IPA
+name: Build Unsigned IPA (iOS 18.1)
 
 on:
-  workflow_dispatch:
-    inputs:
-      deployment_target:
-        description: 'iOS Deployment Target (e.g. 18.1)'
-        required: false
-        default: '18.1'
+  workflow_dispatch: # 允许您在 GitHub Actions 页面手动点击按钮触发编译
   push:
     branches:
-      - main
-    paths:
-      - 'Mobile-O-App/**'
+      - main # 当有代码推送到 main 分支时自动触发 (可按需注释掉)
 
 jobs:
   build:
-    runs-on: macos-15
-    timeout-minutes: 120
-    permissions:
-      contents: read
-
-    env:
-      PROJECT_PATH: Mobile-O-App/app/MobileO.xcodeproj
-      SCHEME: MobileO
-      PRODUCT_NAME: MobileO
-      ARCHIVE_PATH: ${{ github.workspace }}/build/MobileO.xcarchive
-      SPM_PATH: ${{ github.workspace }}/SPM
-      DEPLOYMENT_TARGET: ${{ github.event.inputs.deployment_target || '18.1' }}
+    name: Build iOS App
+    runs-on: macos-latest # 使用最新的 macOS 运行器 (包含最新的 Xcode)
 
     steps:
-      - name: Checkout repository (with submodules)
+      - name: Checkout repository
         uses: actions/checkout@v4
-        with:
-          submodules: recursive
 
-      - name: Select Xcode 16.2 and install iOS platform
+      - name: Select Xcode version
+        # iOS 18.1 需要 Xcode 16.1 或更高版本
+        run: sudo xcode-select -s /Applications/Xcode_16.1.app || sudo xcode-select -s /Applications/Xcode_16.2.app
+
+      - name: Build Unsigned App
         run: |
-          echo "=== All Xcode installations ==="
-          ls -d /Applications/Xcode*.app 2>/dev/null
-
-          # 强制使用 Xcode 16.2
-          if [ -d "/Applications/Xcode_16.2.app" ]; then
-            XCODE_PATH="/Applications/Xcode_16.2.app"
-          else
-            # 退而求其次找 16.x
-            XCODE_PATH=$(ls -d /Applications/Xcode_16*.app 2>/dev/null | sort -V | tail -1)
-            if [ -z "$XCODE_PATH" ]; then
-              echo "::error::No Xcode 16.x found on this runner!"
-              exit 1
-            fi
-          fi
-
-          echo "Using: $XCODE_PATH"
-          sudo xcode-select -s "$XCODE_PATH/Contents/Developer"
-
-          # 关键：导出 DEVELOPER_DIR 确保后续所有步骤都用这个 Xcode
-          echo "DEVELOPER_DIR=$XCODE_PATH/Contents/Developer" >> "$GITHUB_ENV"
-
-          xcodebuild -version
-
-          echo ""
-          echo "=== Check iOS SDK ==="
-          xcodebuild -showsdks 2>/dev/null | grep -i iphoneos || echo "No iphoneos SDK found"
-
-          echo ""
-          echo "=== Check Metal compiler ==="
-          xcrun --find metal 2>/dev/null && echo "Metal compiler found!" || echo "Metal compiler NOT found"
-
-          # 如果没有 iOS SDK，尝试下载
-          if ! xcodebuild -showsdks 2>/dev/null | grep -q "iphoneos"; then
-            echo ""
-            echo "Downloading iOS platform..."
-            xcodebuild -downloadPlatform iOS
-          fi
-
-          echo ""
-          echo "=== Final SDK check ==="
-          xcodebuild -showsdks | grep -i iphoneos
-
-      - name: Verify build environment
-        run: |
-          echo "DEVELOPER_DIR=$DEVELOPER_DIR"
-          echo ""
-          echo "=== xcodebuild version ==="
-          xcodebuild -version
-          echo ""
-          echo "=== metal compiler ==="
-          xcrun --find metal
-          echo ""
-          echo "=== iphoneos SDK path ==="
-          xcrun --sdk iphoneos --show-sdk-path
-          echo ""
-          echo "=== Available destinations ==="
-          xcodebuild -project "$PROJECT_PATH" -scheme "$SCHEME" -showdestinations 2>/dev/null | head -20 || true
-
-      - name: Cache Swift Package dependencies
-        uses: actions/cache@v4
-        with:
-          path: ${{ env.SPM_PATH }}
-          key: spm-${{ runner.os }}-${{ hashFiles('Mobile-O-App/app/MobileO.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved') }}
-          restore-keys: |
-            spm-${{ runner.os }}-
-
-      - name: Resolve Swift Package dependencies
-        run: |
-          xcodebuild -resolvePackageDependencies \
-            -project "$PROJECT_PATH" \
-            -scheme "$SCHEME" \
-            -destination "generic/platform=iOS" \
-            -clonedSourcePackagesDirPath "$SPM_PATH"
-
-      - name: Build and Archive (unsigned)
-        run: |
-          set -o pipefail
-          gem list xcpretty -i >/dev/null 2>&1 || gem install xcpretty --no-document
-          mkdir -p "$(dirname "$ARCHIVE_PATH")"
-
-          xcodebuild archive \
-            -project "$PROJECT_PATH" \
-            -scheme "$SCHEME" \
+          # 进入 iOS 项目所在目录
+          cd Mobile-O-App
+          
+          # 使用 xcodebuild 编译 Release 版本的 .app
+          # 强制指定目标版本为 18.1，并彻底禁用所有签名校验
+          xcodebuild clean build \
+            -project "Mobile-O.xcodeproj" \
+            -scheme "Mobile-O" \
             -configuration Release \
-            -destination "generic/platform=iOS" \
             -sdk iphoneos \
-            -archivePath "$ARCHIVE_PATH" \
-            -clonedSourcePackagesDirPath "$SPM_PATH" \
             CODE_SIGN_IDENTITY="" \
-            CODE_SIGNING_REQUIRED=NO \
-            CODE_SIGNING_ALLOWED=NO \
-            AD_HOC_CODE_SIGNING_ALLOWED=YES \
-            CODE_SIGN_ENTITLEMENTS="" \
-            DEVELOPMENT_TEAM="" \
-            PROVISIONING_PROFILE_SPECIFIER="" \
-            ENABLE_APP_SANDBOX=NO \
-            ENABLE_HARDENED_RUNTIME=NO \
-            ONLY_ACTIVE_ARCH=NO \
-            "IPHONEOS_DEPLOYMENT_TARGET=$DEPLOYMENT_TARGET" \
-            2>&1 | xcpretty --color || \
-            (echo "::warning::xcpretty failed, re-running with raw output" && \
-              xcodebuild archive \
-                -project "$PROJECT_PATH" \
-                -scheme "$SCHEME" \
-                -configuration Release \
-                -destination "generic/platform=iOS" \
-                -sdk iphoneos \
-                -archivePath "$ARCHIVE_PATH" \
-                -clonedSourcePackagesDirPath "$SPM_PATH" \
-                CODE_SIGN_IDENTITY="" \
-                CODE_SIGNING_REQUIRED=NO \
-                CODE_SIGNING_ALLOWED=NO \
-                AD_HOC_CODE_SIGNING_ALLOWED=YES \
-                CODE_SIGN_ENTITLEMENTS="" \
-                DEVELOPMENT_TEAM="" \
-                PROVISIONING_PROFILE_SPECIFIER="" \
-                ENABLE_APP_SANDBOX=NO \
-                ENABLE_HARDENED_RUNTIME=NO \
-                ONLY_ACTIVE_ARCH=NO \
-                "IPHONEOS_DEPLOYMENT_TARGET=$DEPLOYMENT_TARGET")
+            CODE_SIGNING_REQUIRED="NO" \
+            CODE_SIGNING_ALLOWED="NO" \
+            IPHONEOS_DEPLOYMENT_TARGET="18.1" \
+            CONFIGURATION_BUILD_DIR="$(pwd)/build"
 
-      - name: Verify archive
+      - name: Package App into IPA
         run: |
-          APP_PATH="$ARCHIVE_PATH/Products/Applications/$PRODUCT_NAME.app"
-          echo "=== Archive contents ==="
-          ls -la "$ARCHIVE_PATH/Products/Applications/"
-          echo ""
-          echo "=== Info.plist MinimumOSVersion ==="
-          /usr/libexec/PlistBuddy -c "Print MinimumOSVersion" "$APP_PATH/Info.plist" 2>/dev/null || echo "not found"
-          echo ""
-          echo "=== Binary architectures ==="
-          lipo -info "$APP_PATH/$PRODUCT_NAME" 2>/dev/null || file "$APP_PATH/$PRODUCT_NAME" || true
-          echo ""
-          echo "=== App bundle size ==="
-          du -sh "$APP_PATH"
+          cd Mobile-O-App
+          
+          # 标准的 IPA 结构需要一个名为 Payload 的文件夹
+          mkdir -p Payload
+          
+          # 将刚才编译出的 .app 移动到 Payload 文件夹中
+          # 注意：这里的 Mobile-O.app 名称取决于 Xcode 中 Target 的名称，如有不同请在此处修改
+          mv build/Mobile-O.app Payload/
+          
+          # 压缩成无签名的 .ipa 文件
+          zip -qr ../Mobile-O-iOS18.1-Unsigned.ipa Payload
 
-      - name: Create unsigned IPA
-        run: |
-          APP_PATH="$ARCHIVE_PATH/Products/Applications/$PRODUCT_NAME.app"
-          IPA_NAME="${PRODUCT_NAME}-unsigned-iOS${DEPLOYMENT_TARGET}.ipa"
-          IPA_DIR="${GITHUB_WORKSPACE}/build/ipa"
-          PAYLOAD_DIR="$IPA_DIR/Payload"
-          mkdir -p "$PAYLOAD_DIR"
-          cp -R "$APP_PATH" "$PAYLOAD_DIR/"
-          rm -rf "$PAYLOAD_DIR/$PRODUCT_NAME.app/_CodeSignature"
-          rm -f  "$PAYLOAD_DIR/$PRODUCT_NAME.app/embedded.mobileprovision"
-          cd "$IPA_DIR"
-          zip -qr "${GITHUB_WORKSPACE}/build/${IPA_NAME}" Payload/
-          echo "IPA created:"
-          ls -lh "${GITHUB_WORKSPACE}/build/${IPA_NAME}"
-          echo "IPA_NAME=${IPA_NAME}" >> "$GITHUB_ENV"
-
-      - name: Upload IPA artifact
+      - name: Upload IPA Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ env.IPA_NAME }}
-          path: ${{ github.workspace }}/build/${{ env.IPA_NAME }}
-          retention-days: 90
-          if-no-files-found: error
+          name: Mobile-O-Unsigned-IPA
+          path: Mobile-O-iOS18.1-Unsigned.ipa
+          retention-days: 7 # 生成的文件将在 GitHub 上保留 7 天
