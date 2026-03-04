@@ -34,43 +34,55 @@ jobs:
         with:
           submodules: recursive
 
-      - name: Select Xcode version
+      - name: Debug - List all Xcode versions and their SDKs
         run: |
-          ls /Applications/ | grep Xcode || true
-          if [ -d /Applications/Xcode_16.2.app ]; then
-            sudo xcode-select -s /Applications/Xcode_16.2.app/Contents/Developer
-            echo "Selected Xcode 16.2"
-          else
-            LATEST_16=$(ls -d /Applications/Xcode_16*.app 2>/dev/null | sort -V | tail -1)
-            if [ -n "$LATEST_16" ]; then
-              sudo xcode-select -s "$LATEST_16/Contents/Developer"
-              echo "Selected $LATEST_16"
-            else
-              echo "No Xcode 16.x found, using default"
+          echo "=== All Xcode installations ==="
+          ls -d /Applications/Xcode*.app 2>/dev/null || echo "none"
+
+          echo ""
+          for xcode in /Applications/Xcode*.app; do
+            echo "=== $xcode ==="
+            "$xcode/Contents/Developer/usr/bin/xcodebuild" -version 2>/dev/null || true
+            echo "--- iOS SDKs ---"
+            "$xcode/Contents/Developer/usr/bin/xcodebuild" -showsdks 2>/dev/null | grep -i "iphoneos" || echo "  (none)"
+            echo ""
+          done
+
+      - name: Select Xcode with working iOS SDK
+        run: |
+          # 遍历所有 Xcode，找到一个有 iphoneos SDK 的版本
+          SELECTED=""
+          for xcode in $(ls -d /Applications/Xcode*.app 2>/dev/null | sort -V); do
+            if "$xcode/Contents/Developer/usr/bin/xcodebuild" -showsdks 2>/dev/null | grep -q "iphoneos"; then
+              SELECTED="$xcode"
+              echo "Found Xcode with iOS SDK: $SELECTED"
             fi
-          fi
-          xcodebuild -version
+          done
 
-      - name: Install iOS platform support if needed
-        run: |
-          echo "=== Currently installed platforms ==="
-          xcodebuild -showsdks | grep -i ios || true
-          echo ""
-          echo "=== Installed simulator runtimes ==="
-          xcrun simctl list runtimes 2>/dev/null || true
+          if [ -z "$SELECTED" ]; then
+            echo "::error::No Xcode with iOS SDK found! Attempting to download..."
+            # 先选 Xcode 16.2 然后下载 iOS 平台
+            sudo xcode-select -s /Applications/Xcode_16.2.app/Contents/Developer 2>/dev/null || \
+              sudo xcode-select -s "$(ls -d /Applications/Xcode*.app | sort -V | tail -1)/Contents/Developer"
 
-          # Check if iphoneos SDK is available
-          if ! xcodebuild -showsdks | grep -q "iphoneos18"; then
-            echo "iOS 18 SDK not found, downloading iOS platform..."
-            xcodebuild -downloadPlatform iOS
-            echo "Download complete."
+            echo "Downloading iOS platform (this may take 10+ minutes)..."
+            xcodebuild -downloadPlatform iOS || true
+
+            echo "Checking again..."
+            xcodebuild -showsdks | grep -i ios || true
           else
-            echo "iOS 18 SDK already available."
+            sudo xcode-select -s "$SELECTED/Contents/Developer"
           fi
 
           echo ""
-          echo "=== Available SDKs after install ==="
-          xcodebuild -showsdks | grep -i ios || true
+          echo "=== Selected Xcode ==="
+          xcodebuild -version
+          echo ""
+          echo "=== Available iOS SDKs ==="
+          xcodebuild -showsdks | grep -i ios || echo "STILL NO iOS SDK!"
+          echo ""
+          echo "=== Available destinations for scheme ==="
+          xcodebuild -project "$PROJECT_PATH" -scheme "$SCHEME" -showdestinations 2>/dev/null | head -20 || true
 
       - name: Cache Swift Package dependencies
         uses: actions/cache@v4
