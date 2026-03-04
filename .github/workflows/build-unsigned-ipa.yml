@@ -34,54 +34,65 @@ jobs:
         with:
           submodules: recursive
 
-      - name: Select Xcode and pin DEVELOPER_DIR
+      - name: Select Xcode 16.2 and install iOS platform
         run: |
           echo "=== All Xcode installations ==="
-          ls -d /Applications/Xcode*.app 2>/dev/null || echo "none"
+          ls -d /Applications/Xcode*.app 2>/dev/null
 
-          # Prefer Xcode 16.2, then latest 16.x, then any Xcode with iOS SDK
-          if [ -d /Applications/Xcode_16.2.app ]; then
-            SELECTED="/Applications/Xcode_16.2.app"
+          # 强制使用 Xcode 16.2
+          if [ -d "/Applications/Xcode_16.2.app" ]; then
+            XCODE_PATH="/Applications/Xcode_16.2.app"
           else
-            SELECTED=""
-            for xcode in $(ls -d /Applications/Xcode_16*.app 2>/dev/null | sort -V); do
-              SELECTED="$xcode"
-            done
-            if [ -z "$SELECTED" ]; then
-              SELECTED=$(ls -d /Applications/Xcode*.app 2>/dev/null | sort -V | tail -1)
+            # 退而求其次找 16.x
+            XCODE_PATH=$(ls -d /Applications/Xcode_16*.app 2>/dev/null | sort -V | tail -1)
+            if [ -z "$XCODE_PATH" ]; then
+              echo "::error::No Xcode 16.x found on this runner!"
+              exit 1
             fi
           fi
 
-          echo "Using Xcode: $SELECTED"
-          sudo xcode-select -s "$SELECTED/Contents/Developer"
-          # Pin DEVELOPER_DIR so all subsequent xcodebuild/xcrun calls use this Xcode
-          echo "DEVELOPER_DIR=$SELECTED/Contents/Developer" >> "$GITHUB_ENV"
+          echo "Using: $XCODE_PATH"
+          sudo xcode-select -s "$XCODE_PATH/Contents/Developer"
+
+          # 关键：导出 DEVELOPER_DIR 确保后续所有步骤都用这个 Xcode
+          echo "DEVELOPER_DIR=$XCODE_PATH/Contents/Developer" >> "$GITHUB_ENV"
 
           xcodebuild -version
 
-      - name: Install iOS platform support
-        run: |
-          echo "=== Currently available iOS SDKs ==="
-          xcodebuild -showsdks 2>/dev/null | grep -i iphoneos || echo "none"
+          echo ""
+          echo "=== Check iOS SDK ==="
+          xcodebuild -showsdks 2>/dev/null | grep -i iphoneos || echo "No iphoneos SDK found"
 
+          echo ""
+          echo "=== Check Metal compiler ==="
+          xcrun --find metal 2>/dev/null && echo "Metal compiler found!" || echo "Metal compiler NOT found"
+
+          # 如果没有 iOS SDK，尝试下载
           if ! xcodebuild -showsdks 2>/dev/null | grep -q "iphoneos"; then
-            echo "iOS SDK not found, downloading iOS platform..."
+            echo ""
+            echo "Downloading iOS platform..."
             xcodebuild -downloadPlatform iOS
-            echo "Download complete."
-          else
-            echo "iOS SDK already available."
           fi
 
-          echo "=== iOS SDKs after install ==="
-          xcodebuild -showsdks | grep -i iphoneos || echo "STILL NONE"
+          echo ""
+          echo "=== Final SDK check ==="
+          xcodebuild -showsdks | grep -i iphoneos
 
-      - name: Install Metal Toolchain (required for mlx-swift .metal files)
+      - name: Verify build environment
         run: |
-          set -euo pipefail
-          echo "Installing MetalToolchain (may take a few minutes)..."
-          sudo xcodebuild -downloadComponent MetalToolchain
-          echo "Verifying metal compiler exists..."
+          echo "DEVELOPER_DIR=$DEVELOPER_DIR"
+          echo ""
+          echo "=== xcodebuild version ==="
+          xcodebuild -version
+          echo ""
+          echo "=== metal compiler ==="
           xcrun --find metal
+          echo ""
+          echo "=== iphoneos SDK path ==="
+          xcrun --sdk iphoneos --show-sdk-path
+          echo ""
+          echo "=== Available destinations ==="
+          xcodebuild -project "$PROJECT_PATH" -scheme "$SCHEME" -showdestinations 2>/dev/null | head -20 || true
 
       - name: Cache Swift Package dependencies
         uses: actions/cache@v4
