@@ -5,33 +5,30 @@ on:
     branches: [ "main", "master" ]
   pull_request:
     branches: [ "main", "master" ]
-  workflow_dispatch: # 允许在 GitHub Actions 页面手动触发
+  workflow_dispatch:
 
 jobs:
   build:
     name: Build and Package
-    runs-on: macos-15 # 使用 macos-15，内置 Xcode 16，支持 iOS 18 编译
+    runs-on: macos-15
 
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
 
       - name: Select Xcode 16
-        # 尽量选择 Xcode 16.1 或 16.0，这对于编译 iOS 18.1 是必需的
         run: |
           sudo xcode-select -s /Applications/Xcode_16.1.app/Contents/Developer || sudo xcode-select -s /Applications/Xcode_16.0.app/Contents/Developer || echo "Using default Xcode"
           xcodebuild -version
 
       - name: Build Unsigned App
-        # 进入项目目录并使用 xcodebuild 编译
-        # 通过覆盖编译参数来禁用签名，并将部署目标设为 18.1
         run: |
           cd Mobile-O-App/app
           xcodebuild clean build \
             -project MobileO.xcodeproj \
             -scheme MobileO \
             -configuration Release \
-            -sdk iphoneos \
+            -destination "generic/platform=iOS" \
             CODE_SIGN_IDENTITY="" \
             CODE_SIGNING_REQUIRED="NO" \
             CODE_SIGNING_ALLOWED="NO" \
@@ -39,7 +36,6 @@ jobs:
             CONFIGURATION_BUILD_DIR="$(pwd)/build"
 
       - name: Package into Unsigned IPA
-        # 官方未签名的 IPA 本质上就是一个包含 Payload/xxx.app 的 zip 压缩包
         run: |
           cd Mobile-O-App/app
           mkdir -p Payload
@@ -51,4 +47,4 @@ jobs:
         with:
           name: MobileO-Unsigned-IPA
           path: Mobile-O-App/app/MobileO-Unsigned-iOS18.1.ipa
-          retention-days: 7 # 生成的构建产物保留 7 天
+          retention-days: 7
