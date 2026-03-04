@@ -1,0 +1,160 @@
+name: Build Unsigned IPA
+
+on:
+  workflow_dispatch:
+    inputs:
+      deployment_target:
+        description: 'iOS Deployment Target (e.g. 18.1)'
+        required: false
+        default: '18.1'
+  push:
+    branches:
+      - main
+    paths:
+      - 'Mobile-O-App/**'
+
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 90
+    permissions:
+      contents: read
+
+    env:
+      PROJECT_PATH: Mobile-O-App/app/MobileO.xcodeproj
+      SCHEME: MobileO
+      PRODUCT_NAME: MobileO
+      ARCHIVE_PATH: ${{ github.workspace }}/build/MobileO.xcarchive
+      SPM_PATH: ${{ github.workspace }}/SPM
+      DEPLOYMENT_TARGET: ${{ github.event.inputs.deployment_target || '18.1' }}
+
+    steps:
+      - name: Checkout repository (with submodules)
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Select Xcode version
+        run: |
+          # Try Xcode 16.2 first, fall back to latest 16.x
+          if [ -d /Applications/Xcode_16.2.app ]; then
+            sudo xcode-select -s /Applications/Xcode_16.2.app/Contents/Developer
+            echo "Selected Xcode 16.2"
+          else
+            LATEST_16=$(ls /Applications/ | grep -E '^Xcode_16\.' | sort -V | tail -1)
+            if [ -n "$LATEST_16" ]; then
+              sudo xcode-select -s "/Applications/${LATEST_16}/Contents/Developer"
+              echo "Selected ${LATEST_16}"
+            else
+              echo "No Xcode 16.x found, using default"
+            fi
+          fi
+          xcodebuild -version
+
+      - name: Cache Swift Package dependencies
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.SPM_PATH }}
+          key: spm-${{ runner.os }}-${{ hashFiles('Mobile-O-App/app/MobileO.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved') }}
+          restore-keys: |
+            spm-${{ runner.os }}-
+
+      - name: Resolve Swift Package dependencies
+        run: |
+          xcodebuild -resolvePackageDependencies \
+            -project "$PROJECT_PATH" \
+            -scheme "$SCHEME" \
+            -clonedSourcePackagesDirPath "$SPM_PATH"
+
+      - name: Build and Archive (unsigned)
+        run: |
+          set -o pipefail
+
+          # Install xcpretty if not available
+          gem list xcpretty -i || gem install xcpretty --no-document
+
+          mkdir -p "$(dirname "$ARCHIVE_PATH")"
+
+          XCODEBUILD_ARGS=(
+            archive
+            -project "$PROJECT_PATH"
+            -scheme "$SCHEME"
+            -configuration Release
+            -archivePath "$ARCHIVE_PATH"
+            -clonedSourcePackagesDirPath "$SPM_PATH"
+            CODE_SIGN_IDENTITY=""
+            CODE_SIGNING_REQUIRED=NO
+            CODE_SIGNING_ALLOWED=NO
+            AD_HOC_CODE_SIGNING_ALLOWED=YES
+            CODE_SIGN_ENTITLEMENTS=""
+            DEVELOPMENT_TEAM=""
+            PROVISIONING_PROFILE_SPECIFIER=""
+            ENABLE_APP_SANDBOX=NO
+            ENABLE_HARDENED_RUNTIME=NO
+            ONLY_ACTIVE_ARCH=NO
+            "IPHONEOS_DEPLOYMENT_TARGET=$DEPLOYMENT_TARGET"
+          )
+
+          xcodebuild "${XCODEBUILD_ARGS[@]}" | xcpretty || \
+            (echo "xcpretty formatting unavailable, re-running build with raw output:" && \
+              xcodebuild "${XCODEBUILD_ARGS[@]}")
+
+      - name: Verify archive
+        run: |
+          APP_PATH="$ARCHIVE_PATH/Products/Applications/$PRODUCT_NAME.app"
+
+          echo "=== Archive contents ==="
+          ls -la "$ARCHIVE_PATH/Products/Applications/"
+
+          echo ""
+          echo "=== Info.plist MinimumOSVersion ==="
+          MIN_OS=$(/usr/libexec/PlistBuddy -c "Print MinimumOSVersion" "$APP_PATH/Info.plist" 2>/dev/null || echo "not found")
+          echo "MinimumOSVersion: $MIN_OS"
+
+          echo ""
+          echo "=== Binary architectures ==="
+          BINARY="$APP_PATH/$PRODUCT_NAME"
+          if [ -f "$BINARY" ]; then
+            lipo -info "$BINARY"
+          else
+            echo "Binary not found at $BINARY"
+            find "$APP_PATH" -type f -perm +0111 | head -5
+          fi
+
+          echo ""
+          echo "=== App bundle size ==="
+          du -sh "$APP_PATH"
+
+      - name: Create unsigned IPA
+        run: |
+          APP_PATH="$ARCHIVE_PATH/Products/Applications/$PRODUCT_NAME.app"
+          IPA_NAME="${PRODUCT_NAME}-unsigned-iOS${DEPLOYMENT_TARGET}.ipa"
+          IPA_DIR="${GITHUB_WORKSPACE}/build/ipa"
+          PAYLOAD_DIR="$IPA_DIR/Payload"
+
+          mkdir -p "$PAYLOAD_DIR"
+
+          echo "Copying .app bundle to Payload/"
+          cp -R "$APP_PATH" "$PAYLOAD_DIR/"
+
+          echo "Removing code signature artifacts..."
+          rm -rf "$PAYLOAD_DIR/$PRODUCT_NAME.app/_CodeSignature"
+          rm -f  "$PAYLOAD_DIR/$PRODUCT_NAME.app/embedded.mobileprovision"
+
+          echo "Creating IPA archive..."
+          cd "$IPA_DIR"
+          zip -qr "${GITHUB_WORKSPACE}/build/${IPA_NAME}" Payload/
+
+          echo "IPA created: ${GITHUB_WORKSPACE}/build/${IPA_NAME}"
+          ls -lh "${GITHUB_WORKSPACE}/build/${IPA_NAME}"
+
+          # Export IPA name for upload step
+          echo "IPA_NAME=${IPA_NAME}" >> "$GITHUB_ENV"
+
+      - name: Upload IPA artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.IPA_NAME }}
+          path: ${{ github.workspace }}/build/${{ env.IPA_NAME }}
+          retention-days: 90
+          if-no-files-found: error
