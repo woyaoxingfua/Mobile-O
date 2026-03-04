@@ -36,7 +36,7 @@ jobs:
 
       - name: Select Xcode version
         run: |
-          # Try Xcode 16.2 first, fall back to latest 16.x
+          ls /Applications/ | grep Xcode || true
           if [ -d /Applications/Xcode_16.2.app ]; then
             sudo xcode-select -s /Applications/Xcode_16.2.app/Contents/Developer
             echo "Selected Xcode 16.2"
@@ -50,6 +50,8 @@ jobs:
             fi
           fi
           xcodebuild -version
+          echo "=== Available iOS SDKs ==="
+          xcodebuild -showsdks | grep -i ios || true
 
       - name: Cache Swift Package dependencies
         uses: actions/cache@v4
@@ -64,15 +66,13 @@ jobs:
           xcodebuild -resolvePackageDependencies \
             -project "$PROJECT_PATH" \
             -scheme "$SCHEME" \
+            -destination "generic/platform=iOS" \
             -clonedSourcePackagesDirPath "$SPM_PATH"
 
       - name: Build and Archive (unsigned)
         run: |
           set -o pipefail
-
-          # Install xcpretty if not available
-          gem list xcpretty -i || gem install xcpretty --no-document
-
+          gem list xcpretty -i >/dev/null 2>&1 || gem install xcpretty --no-document
           mkdir -p "$(dirname "$ARCHIVE_PATH")"
 
           XCODEBUILD_ARGS=(
@@ -80,6 +80,8 @@ jobs:
             -project "$PROJECT_PATH"
             -scheme "$SCHEME"
             -configuration Release
+            -destination "generic/platform=iOS"
+            -sdk iphoneos
             -archivePath "$ARCHIVE_PATH"
             -clonedSourcePackagesDirPath "$SPM_PATH"
             CODE_SIGN_IDENTITY=""
@@ -95,22 +97,19 @@ jobs:
             "IPHONEOS_DEPLOYMENT_TARGET=$DEPLOYMENT_TARGET"
           )
 
-          xcodebuild "${XCODEBUILD_ARGS[@]}" | xcpretty || \
-            (echo "xcpretty formatting unavailable, re-running build with raw output:" && \
+          xcodebuild "${XCODEBUILD_ARGS[@]}" 2>&1 | xcpretty --color || \
+            (echo "::warning::xcpretty failed, re-running with raw output" && \
               xcodebuild "${XCODEBUILD_ARGS[@]}")
 
       - name: Verify archive
         run: |
           APP_PATH="$ARCHIVE_PATH/Products/Applications/$PRODUCT_NAME.app"
-
           echo "=== Archive contents ==="
           ls -la "$ARCHIVE_PATH/Products/Applications/"
-
           echo ""
           echo "=== Info.plist MinimumOSVersion ==="
           MIN_OS=$(/usr/libexec/PlistBuddy -c "Print MinimumOSVersion" "$APP_PATH/Info.plist" 2>/dev/null || echo "not found")
           echo "MinimumOSVersion: $MIN_OS"
-
           echo ""
           echo "=== Binary architectures ==="
           BINARY="$APP_PATH/$PRODUCT_NAME"
@@ -120,7 +119,6 @@ jobs:
             echo "Binary not found at $BINARY"
             find "$APP_PATH" -type f -perm +0111 | head -5
           fi
-
           echo ""
           echo "=== App bundle size ==="
           du -sh "$APP_PATH"
@@ -131,24 +129,17 @@ jobs:
           IPA_NAME="${PRODUCT_NAME}-unsigned-iOS${DEPLOYMENT_TARGET}.ipa"
           IPA_DIR="${GITHUB_WORKSPACE}/build/ipa"
           PAYLOAD_DIR="$IPA_DIR/Payload"
-
           mkdir -p "$PAYLOAD_DIR"
-
           echo "Copying .app bundle to Payload/"
           cp -R "$APP_PATH" "$PAYLOAD_DIR/"
-
           echo "Removing code signature artifacts..."
           rm -rf "$PAYLOAD_DIR/$PRODUCT_NAME.app/_CodeSignature"
           rm -f  "$PAYLOAD_DIR/$PRODUCT_NAME.app/embedded.mobileprovision"
-
           echo "Creating IPA archive..."
           cd "$IPA_DIR"
           zip -qr "${GITHUB_WORKSPACE}/build/${IPA_NAME}" Payload/
-
           echo "IPA created: ${GITHUB_WORKSPACE}/build/${IPA_NAME}"
           ls -lh "${GITHUB_WORKSPACE}/build/${IPA_NAME}"
-
-          # Export IPA name for upload step
           echo "IPA_NAME=${IPA_NAME}" >> "$GITHUB_ENV"
 
       - name: Upload IPA artifact
