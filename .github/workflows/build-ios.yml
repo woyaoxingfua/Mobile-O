@@ -33,92 +33,76 @@ jobs:
           echo "=== 验证修改 ==="
           grep "IPHONEOS_DEPLOYMENT_TARGET" "$PROJECT_FILE" | head -5
       
-      - name: Build Archive
+      - name: Build (using build command - like 75a48b0)
         working-directory: Mobile-O-App/app
         run: |
-          # 使用 archive 构建（确保 Frameworks 被正确嵌入）
-          xcodebuild clean archive \
+          # 使用 build 命令（75a48b0 成功版本的方式）
+          xcodebuild clean build \
             -project MobileO.xcodeproj \
             -scheme MobileO \
             -configuration Release \
-            -archivePath "build/MobileO.xcarchive" \
             -sdk iphoneos \
             -destination "generic/platform=iOS" \
+            -derivedDataPath DerivedData \
             CODE_SIGN_IDENTITY="" \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGNING_ALLOWED=NO \
             IPHONEOS_DEPLOYMENT_TARGET=18.0 \
             ONLY_ACTIVE_ARCH=NO \
             ARCHS=arm64 \
+            SWIFT_VERSION=5 \
             SWIFT_STRICT_CONCURRENCY=minimal \
             OTHER_SWIFT_FLAGS="-strict-concurrency=minimal -Xfrontend -disable-availability-checking" \
             ALWAYS_EMBED_SWIFT_STANDARD_LIBRARIES=YES \
             2>&1 | tee build.log
           
-          # 检查 archive 是否生成
-          if [ ! -d "build/MobileO.xcarchive" ]; then
-            echo "ERROR: Archive 未生成"
+          # 查找 .app 文件
+          APP_PATH=$(find DerivedData -name "MobileO.app" -type d 2>/dev/null | head -1)
+          
+          if [ -z "$APP_PATH" ]; then
+            echo "ERROR: 未找到 MobileO.app"
+            find . -name "*.app" -type d 2>/dev/null
             tail -100 build.log
             exit 1
           fi
           
-          echo "=== Archive 生成成功 ==="
-          ls -la build/MobileO.xcarchive/Products/Applications/
+          echo "=== 找到 .app ==="
+          echo "$APP_PATH"
+          ls -la "$APP_PATH"
       
-      - name: Package IPA with Embedded Frameworks
+      - name: Package IPA
         working-directory: Mobile-O-App/app
         run: |
-          ARCHIVE_APP="build/MobileO.xcarchive/Products/Applications/MobileO.app"
+          # 查找构建好的 .app
+          APP_PATH=$(find DerivedData -name "MobileO.app" -type d 2>/dev/null | head -1)
           
-          if [ ! -d "$ARCHIVE_APP" ]; then
-            echo "ERROR: 未找到 Archive 中的 .app"
-            find build -name "*.app" -type d
+          if [ -z "$APP_PATH" ]; then
+            echo "ERROR: 未找到 .app"
             exit 1
           fi
           
-          echo "=== 检查原始 .app 结构 ==="
-          ls -la "$ARCHIVE_APP"
+          echo "=== 检查 .app 结构 ==="
+          ls -la "$APP_PATH"
           
           echo "=== 检查 Frameworks ==="
-          ls -la "$ARCHIVE_APP/Frameworks" 2>/dev/null || echo "⚠️ 没有 Frameworks 目录！"
+          ls -la "$APP_PATH/Frameworks" 2>/dev/null || echo "⚠️ 没有 Frameworks 目录！"
           
           # 创建 Payload
           rm -rf Payload
           mkdir -p Payload
           
           # 复制 .app
-          cp -R "$ARCHIVE_APP" Payload/
+          cp -R "$APP_PATH" Payload/
           
           # 清理签名
           rm -rf Payload/MobileO.app/_CodeSignature
           rm -f Payload/MobileO.app/embedded.mobileprovision 2>/dev/null || true
           
-          # 验证 Info.plist
-          echo "=== Info.plist ==="
-          plutil -p Payload/MobileO.app/Info.plist | grep -E "CFBundleExecutable|CFBundleIdentifier|MinimumOSVersion"
-          
-          # 验证可执行文件
-          echo "=== 可执行文件 ==="
-          ls -la Payload/MobileO.app/MobileO
-          file Payload/MobileO.app/MobileO
-          
           # 创建 IPA
-          zip -qr9 MobileO_iOS18.ipa Payload
+          zip -qr MobileO_iOS18.ipa Payload
           
-          echo "=== IPA 信息 ==="
+          echo "=== IPA 创建成功 ==="
           ls -lh MobileO_iOS18.ipa
-          unzip -l MobileO_iOS18.ipa | head -40
-          
-          # 最终验证
-          echo "=== 最终验证 ==="
-          rm -rf verify
-          mkdir verify && cd verify
-          unzip -q ../MobileO_iOS18.ipa
-          echo "解压后内容:"
-          ls -la Payload/MobileO.app/
-          echo "Frameworks:"
-          ls -la Payload/MobileO.app/Frameworks/ 2>/dev/null | head -20
-          cd .. && rm -rf verify
       
       - name: Upload IPA
         uses: actions/upload-artifact@v4
@@ -133,4 +117,3 @@ jobs:
           name: build-debug
           path: |
             Mobile-O-App/app/build.log
-            Mobile-O-App/app/build/
