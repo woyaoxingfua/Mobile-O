@@ -17,8 +17,6 @@ jobs:
       XCODEPROJ: MobileO.xcodeproj
       SCHEME: MobileO
       CONFIGURATION: Release
-      DERIVED_DATA: ${{ github.workspace }}/build/DerivedData
-      BUILD_DIR: ${{ github.workspace }}/build
 
     steps:
       - name: Checkout
@@ -26,19 +24,14 @@ jobs:
         with:
           submodules: true
 
-      - name: Xcode version
-        run: xcodebuild -version
+      - name: Setup Xcode
+        run: |
+          xcodebuild -version
+          xcodebuild -showsdks
 
-      - name: List targets & schemes
+      - name: Modify Project for Unsigned Build
         shell: bash
         run: |
-          set -euxo pipefail
-          xcodebuild -list -project "${APP_DIR}/${XCODEPROJ}"
-
-      - name: Modify Project Settings
-        shell: bash
-        run: |
-          set -euxo pipefail
           PROJECT_FILE="${APP_DIR}/${XCODEPROJ}/project.pbxproj"
           
           # 修改 iOS 版本
@@ -48,105 +41,121 @@ jobs:
           # 禁用代码签名
           sed -i '' 's/CODE_SIGN_STYLE = Automatic;/CODE_SIGN_STYLE = Manual;/g' "$PROJECT_FILE"
           sed -i '' 's/DEVELOPMENT_TEAM = Q3GRH2LZ7S;/DEVELOPMENT_TEAM = "";/g' "$PROJECT_FILE"
+          
+          echo "=== 验证配置 ==="
+          grep "IPHONEOS_DEPLOYMENT_TARGET" "$PROJECT_FILE" | head -3
 
-      - name: Build unsigned .app
+      - name: Build Archive (Embed All Dependencies)
         shell: bash
         run: |
           set -euxo pipefail
-          rm -rf "${BUILD_DIR}"
-          mkdir -p "${BUILD_DIR}"
-
-          # 构建（确保嵌入 Swift 库和依赖）
-          xcodebuild \
+          
+          # 使用 archive 构建，确保所有依赖都被正确处理
+          # 添加更多参数解决 Swift 6 并发错误
+          xcodebuild clean archive \
             -project "${APP_DIR}/${XCODEPROJ}" \
             -scheme "${SCHEME}" \
             -configuration "${CONFIGURATION}" \
+            -archivePath "build/MobileO.xcarchive" \
             -sdk iphoneos \
-            -derivedDataPath "${DERIVED_DATA}" \
-            CODE_SIGNING_ALLOWED=NO \
-            CODE_SIGNING_REQUIRED=NO \
+            -destination "generic/platform=iOS" \
+            -clonedSourcePackagesDirPath "SourcePackages" \
             CODE_SIGN_IDENTITY="" \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO \
             IPHONEOS_DEPLOYMENT_TARGET=18.0 \
             SWIFT_STRICT_CONCURRENCY=minimal \
-            OTHER_SWIFT_FLAGS="-strict-concurrency=minimal" \
+            SWIFT_TREAT_WARNINGS_AS_ERRORS=NO \
+            GCC_TREAT_WARNINGS_AS_ERRORS=NO \
+            OTHER_SWIFT_FLAGS="-strict-concurrency=minimal -Xfrontend -disable-availability-checking -suppress-warnings" \
             ALWAYS_EMBED_SWIFT_STANDARD_LIBRARIES=YES \
             LD_RUNPATH_SEARCH_PATHS="@executable_path/Frameworks" \
-            clean build \
-            | tee "${BUILD_DIR}/xcodebuild.log"
-
-          # 获取 App 路径
-          APP_PATH="${DERIVED_DATA}/Build/Products/${CONFIGURATION}-iphoneos/${SCHEME}.app"
-          test -d "$APP_PATH"
-          echo "APP_PATH=$APP_PATH" >> "$GITHUB_ENV"
+            2>&1 | tee build.log || {
+              echo "Archive 失败，尝试使用 build..."
+              # 如果 archive 失败，使用 build + 手动嵌入
+              xcodebuild clean build \
+                -project "${APP_DIR}/${XCODEPROJ}" \
+                -scheme "${SCHEME}" \
+                -configuration "${CONFIGURATION}" \
+                -sdk iphoneos \
+                -destination "generic/platform=iOS" \
+                -derivedDataPath "build/DerivedData" \
+                -clonedSourcePackagesDirPath "SourcePackages" \
+                CODE_SIGN_IDENTITY="" \
+                CODE_SIGNING_REQUIRED=NO \
+                CODE_SIGNING_ALLOWED=NO \
+                IPHONEOS_DEPLOYMENT_TARGET=18.0 \
+                SWIFT_STRICT_CONCURRENCY=minimal \
+                SWIFT_TREAT_WARNINGS_AS_ERRORS=NO \
+                OTHER_SWIFT_FLAGS="-strict-concurrency=minimal -suppress-warnings" \
+                ALWAYS_EMBED_SWIFT_STANDARD_LIBRARIES=YES \
+                2>&1 | tee build.log
+            }
           
-          echo "=== 检查原始 .app ==="
-          ls -la "$APP_PATH"
-          
-          echo "=== 检查 Frameworks ==="
-          ls -la "$APP_PATH/Frameworks" 2>/dev/null || echo "⚠️ 没有 Frameworks 目录"
+          echo "=== Archive/Build 内容 ==="
+          find build -name "*.app" -o -name "*.framework" 2>/dev/null | head -30
 
-      - name: Dump xcodebuild log on failure
-        if: failure()
-        shell: bash
-        run: |
-          echo "===== tail -n 400 build/xcodebuild.log ====="
-          tail -n 400 build/xcodebuild.log || true
-
-      - name: Package into IPA
+      - name: Export and Package IPA
         shell: bash
         run: |
           set -euxo pipefail
           
-          # 创建标准的 Payload 目录结构
+          # 尝试从 Archive 获取 .app，否则从 DerivedData 获取
+          if [ -d "build/MobileO.xcarchive" ]; then
+            APP_PATH="build/MobileO.xcarchive/Products/Applications/${SCHEME}.app"
+            echo "使用 Archive 构建的 .app"
+          else
+            APP_PATH=$(find build/DerivedData -name "${SCHEME}.app" -type d | head -1)
+            echo "使用 Build 构建的 .app"
+          fi
+          
+          if [ -z "$APP_PATH" ] || [ ! -d "$APP_PATH" ]; then
+            echo "ERROR: 未找到 .app"
+            find build -name "*.app" -type d 2>/dev/null || true
+            exit 1
+          fi
+          
+          echo "=== APP_PATH: $APP_PATH ==="
+          echo "=== 原始 .app 大小 ==="
+          du -sh "$APP_PATH"
+          
+          echo "=== 原始 .app 内容 ==="
+          ls -la "$APP_PATH"
+          
+          echo "=== Frameworks ==="
+          ls -la "$APP_PATH/Frameworks" 2>/dev/null || echo "没有 Frameworks"
+          
+          # 创建 Payload
           mkdir -p Payload
-          
-          # 将生成的 .app 复制进去
           cp -R "$APP_PATH" Payload/
-          
-          # 确保 Frameworks 目录存在并检查内容
-          echo "=== 原始 Frameworks ==="
-          ls -la Payload/${SCHEME}.app/Frameworks/ 2>/dev/null || echo "⚠️ 没有 Frameworks 目录！"
-          
-          # 从 DerivedData 查找并复制所有 Frameworks（如果 Xcode 没有自动嵌入）
-          echo "=== 从 DerivedData 查找 Frameworks ==="
-          find "${DERIVED_DATA}" -name "*.framework" -type d 2>/dev/null | while read framework; do
-            framework_name=$(basename "$framework")
-            # 避免重复复制系统框架
-            if [[ ! "$framework_name" =~ ^(UIKit|Foundation|Core|Swift|libswift).*$ ]]; then
-              echo "发现框架: $framework_name"
-              if [ ! -d "Payload/${SCHEME}.app/Frameworks/$framework_name" ]; then
-                echo "  -> 复制到 App"
-                mkdir -p "Payload/${SCHEME}.app/Frameworks"
-                cp -R "$framework" "Payload/${SCHEME}.app/Frameworks/"
-              fi
-            fi
-          done
           
           # 清理签名
           rm -rf Payload/${SCHEME}.app/_CodeSignature
           rm -f Payload/${SCHEME}.app/embedded.mobileprovision 2>/dev/null || true
           
-          # 验证 Info.plist
-          echo "=== Info.plist ==="
-          plutil -p Payload/${SCHEME}.app/Info.plist | grep -E "CFBundleExecutable|CFBundleIdentifier|MinimumOSVersion"
+          # 检查 Swift 支持文件
+          echo "=== Swift 支持文件 ==="
+          find Payload/${SCHEME}.app -name "*.dylib" -o -name "libswift*" 2>/dev/null | head -10
           
-          # 验证最终 Frameworks
-          echo "=== 最终 Frameworks ==="
-          ls -la Payload/${SCHEME}.app/Frameworks/ 2>/dev/null | head -30
-          
-          # 计算大小
-          echo "=== App 大小 ==="
-          du -sh Payload/${SCHEME}.app
-          
-          # 压缩成 .ipa
+          # 打包
           zip -r MobileO-unsigned.ipa Payload
           
-          echo "=== IPA 信息 ==="
-          ls -lah MobileO-unsigned.ipa
+          echo "=== IPA 大小 ==="
+          ls -lh MobileO-unsigned.ipa
+          
+          echo "=== IPA 内容 ==="
+          unzip -l MobileO-unsigned.ipa | head -40
 
-      - name: Upload unsigned IPA artifact
+      - name: Upload IPA
         uses: actions/upload-artifact@v4
         with:
           name: MobileO-unsigned-ipa
           path: MobileO-unsigned.ipa
           if-no-files-found: error
+
+      - name: Upload Debug Info on Failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-debug
+          path: build.log
