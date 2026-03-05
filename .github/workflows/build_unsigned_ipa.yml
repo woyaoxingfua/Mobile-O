@@ -1,0 +1,209 @@
+name: Build Unsigned IPA (iOS 18.1)
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+env:
+  XCODE_VERSION: "16.0"
+
+jobs:
+  build:
+    name: Build Unsigned IPA
+    runs-on: macos-15  # macOS 15 支持 Xcode 16
+    
+    steps:
+    - name: Checkout Repository
+      uses: actions/checkout@v4
+      with:
+        submodules: recursive
+        
+    - name: Select Xcode Version
+      run: |
+        sudo xcode-select -s /Applications/Xcode_16.app/Contents/Developer
+        xcodebuild -version
+        xcode-select -p
+        
+    - name: Setup Xcode Command Line Tools
+      run: |
+        xcode-select --install 2>/dev/null || true
+        
+    - name: Pre-build Setup
+      run: |
+        # 启用详细日志
+        set -x
+        
+        # 显示系统信息
+        sw_vers
+        uname -a
+        xcrun --show-sdk-path
+        xcrun --show-sdk-version
+        
+    - name: Modify Project Settings for iOS 18.1 & Unsigned Build
+      working-directory: Mobile-O-App/app
+      run: |
+        PROJECT_FILE="MobileO.xcodeproj/project.pbxproj"
+        
+        echo "=== 原始配置 ==="
+        grep -n "IPHONEOS_DEPLOYMENT_TARGET" "$PROJECT_FILE" || true
+        grep -n "CODE_SIGN_STYLE" "$PROJECT_FILE" || true
+        grep -n "DEVELOPMENT_TEAM" "$PROJECT_FILE" || true
+        
+        echo "=== 修改配置 ==="
+        
+        # 1. 修改部署目标为 iOS 18.1
+        sed -i '' 's/IPHONEOS_DEPLOYMENT_TARGET = 18.2;/IPHONEOS_DEPLOYMENT_TARGET = 18.1;/g' "$PROJECT_FILE"
+        sed -i '' 's/IPHONEOS_DEPLOYMENT_TARGET = 18.0;/IPHONEOS_DEPLOYMENT_TARGET = 18.1;/g' "$PROJECT_FILE"
+        
+        # 2. 禁用自动代码签名
+        sed -i '' 's/CODE_SIGN_STYLE = Automatic;/CODE_SIGN_STYLE = Manual;/g' "$PROJECT_FILE"
+        
+        # 3. 清除开发团队
+        sed -i '' 's/DEVELOPMENT_TEAM = Q3GRH2LZ7S;/DEVELOPMENT_TEAM = "";/g' "$PROJECT_FILE"
+        
+        # 4. 清除代码签名身份
+        sed -i '' 's/CODE_SIGN_IDENTITY = "iPhone Developer";/CODE_SIGN_IDENTITY = "";/g' "$PROJECT_FILE"
+        sed -i '' 's/CODE_SIGN_IDENTITY = "iPhone Distribution";/CODE_SIGN_IDENTITY = "";/g' "$PROJECT_FILE"
+        
+        echo "=== 修改后配置 ==="
+        grep -n "IPHONEOS_DEPLOYMENT_TARGET" "$PROJECT_FILE" || true
+        grep -n "CODE_SIGN_STYLE" "$PROJECT_FILE" || true
+        grep -n "DEVELOPMENT_TEAM" "$PROJECT_FILE" || true
+        
+    - name: Resolve Swift Package Dependencies
+      working-directory: Mobile-O-App/app
+      run: |
+        xcodebuild -project MobileO.xcodeproj \
+          -scheme MobileO \
+          -destination "generic/platform=iOS" \
+          resolvePackageDependencies \
+          -skipPackagePluginValidation \
+          -skipMacroValidation
+          
+    - name: Build Archive (Unsigned)
+      working-directory: Mobile-O-App/app
+      run: |
+        set -o pipefail
+        
+        # 清理之前的构建
+        rm -rf build
+        mkdir -p build
+        
+        # 构建 Archive
+        xcodebuild archive \
+          -project MobileO.xcodeproj \
+          -scheme MobileO \
+          -destination "generic/platform=iOS" \
+          -archivePath "build/MobileO.xcarchive" \
+          IPHONEOS_DEPLOYMENT_TARGET=18.1 \
+          CODE_SIGNING_REQUIRED=NO \
+          CODE_SIGNING_ALLOWED=NO \
+          CODE_SIGN_IDENTITY="" \
+          DEVELOPMENT_TEAM="" \
+          AD_HOC_CODE_SIGNING_ALLOWED=NO \
+          ONLY_ACTIVE_ARCH=NO \
+          ARCHS="arm64" \
+          -skipPackagePluginValidation \
+          -skipMacroValidation \
+          2>&1 | tee build/build_log.txt
+          
+    - name: Create Unsigned IPA
+      working-directory: Mobile-O-App/app
+      run: |
+        set -e
+        
+        ARCHIVE_PATH="build/MobileO.xcarchive"
+        OUTPUT_PATH="build/output"
+        
+        # 检查 archive 是否生成
+        if [ ! -d "$ARCHIVE_PATH" ]; then
+          echo "错误: Archive 未生成"
+          exit 1
+        fi
+        
+        echo "=== Archive 内容 ==="
+        ls -la "$ARCHIVE_PATH/Products/Applications/" || true
+        
+        # 创建输出目录
+        mkdir -p "$OUTPUT_PATH"
+        
+        # 手动创建 IPA (Payload 方式)
+        APP_NAME="MobileO.app"
+        APP_PATH="$ARCHIVE_PATH/Products/Applications/$APP_NAME"
+        
+        if [ ! -d "$APP_PATH" ]; then
+          echo "错误: 未找到 .app 文件"
+          find "$ARCHIVE_PATH" -name "*.app" -type d
+          exit 1
+        fi
+        
+        # 创建 Payload 目录
+        mkdir -p "$OUTPUT_PATH/Payload"
+        cp -R "$APP_PATH" "$OUTPUT_PATH/Payload/"
+        
+        # 移除任何已有的签名
+        rm -rf "$OUTPUT_PATH/Payload/$APP_NAME/_CodeSignature"
+        rm -f "$OUTPUT_PATH/Payload/$APP_NAME/CodeResources" 2>/dev/null || true
+        
+        # 创建 IPA
+        cd "$OUTPUT_PATH"
+        zip -r "MobileO_Unsigned_iOS18.1.ipa" Payload
+        rm -rf Payload
+        
+        echo "=== IPA 创建成功 ==="
+        ls -lh "MobileO_Unsigned_iOS18.1.ipa"
+        
+    - name: Verify IPA Structure
+      working-directory: Mobile-O-App/app/build/output
+      run: |
+        echo "=== IPA 内容验证 ==="
+        unzip -l "MobileO_Unsigned_iOS18.1.ipa"
+        
+        echo ""
+        echo "=== 提取 Info.plist 验证 ==="
+        unzip -p "MobileO_Unsigned_iOS18.1.ipa" "Payload/MobileO.app/Info.plist" > /tmp/Info.plist
+        plutil -p /tmp/Info.plist || true
+        
+        echo ""
+        echo "=== 检查签名状态 ==="
+        # 解压并检查签名
+        unzip -q "MobileO_Unsigned_iOS18.1.ipa" -d /tmp/ipa_check
+        ls -la /tmp/ipa_check/Payload/MobileO.app/ | grep -E "CodeSignature|embedded" || echo "无签名文件 (预期结果)"
+        rm -rf /tmp/ipa_check
+        
+    - name: Upload IPA Artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: MobileO-Unsigned-iOS18.1
+        path: Mobile-O-App/app/build/output/MobileO_Unsigned_iOS18.1.ipa
+        if-no-files-found: error
+        
+    - name: Upload Build Logs (on failure)
+      if: failure()
+      uses: actions/upload-artifact@v4
+      with:
+        name: build-logs
+        path: |
+          Mobile-O-App/app/build/build_log.txt
+          Mobile-O-App/app/build/MobileO.xcarchive/Logs/
+        if-no-files-found: ignore
+        
+    - name: Create Release Summary
+      run: |
+        echo "## 📱 Mobile-O 构建完成" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "### 构建信息" >> $GITHUB_STEP_SUMMARY
+        echo "- **目标系统**: iOS 18.1+" >> $GITHUB_STEP_SUMMARY
+        echo "- **签名状态**: 未签名 (Unsigned)" >> $GITHUB_STEP_SUMMARY
+        echo "- **架构**: arm64" >> $GITHUB_STEP_SUMMARY
+        echo "- **Xcode 版本**: 16.0" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "### 安装说明" >> $GITHUB_STEP_SUMMARY
+        echo "此 IPA 文件为未签名版本，可通过以下方式安装:" >> $GITHUB_STEP_SUMMARY
+        echo "1. **TrollStore** (推荐): 无需签名直接安装" >> $GITHUB_STEP_SUMMARY
+        echo "2. **AltStore**: 使用个人 Apple ID 签名安装" >> $GITHUB_STEP_SUMMARY
+        echo "3. **侧载工具**: 如 Sideloadly 等" >> $GITHUB_STEP_SUMMARY
+        echo "4. **自行签名**: 使用个人开发者证书重新签名" >> $GITHUB_STEP_SUMMARY
