@@ -73,16 +73,6 @@ jobs:
         grep -n "CODE_SIGN_STYLE" "$PROJECT_FILE" || true
         grep -n "DEVELOPMENT_TEAM" "$PROJECT_FILE" || true
         
-    - name: Resolve Swift Package Dependencies
-      working-directory: Mobile-O-App/app
-      run: |
-        xcodebuild -project MobileO.xcodeproj \
-          -scheme MobileO \
-          -destination "generic/platform=iOS" \
-          resolvePackageDependencies \
-          -skipPackagePluginValidation \
-          -skipMacroValidation
-          
     - name: Build Archive (Unsigned)
       working-directory: Mobile-O-App/app
       run: |
