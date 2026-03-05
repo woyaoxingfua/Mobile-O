@@ -1,4 +1,4 @@
-name: Build iOS IPA for LiveContainer
+name: Build iOS IPA
 
 on:
   workflow_dispatch:
@@ -15,33 +15,44 @@ jobs:
         run: |
           sudo xcode-select -s /Applications/Xcode_16.1.app/Contents/Developer
           xcodebuild -version
+          
+          # 安装 iOS 平台
           sudo xcodebuild -downloadPlatform iOS || true
+          
+          # 检查可用的 SDKs
+          echo "=== Available SDKs ==="
+          xcodebuild -showsdks
+          
+          # 检查可用的 destinations
+          echo "=== Available Destinations ==="
+          cd Mobile-O-App/app
+          xcodebuild -project MobileO.xcodeproj -scheme MobileO -showdestinations 2>&1 | head -50 || true
       
-      - name: Modify Project for LiveContainer
+      - name: Modify Project Settings
         working-directory: Mobile-O-App/app
         run: |
-          PROJECT_FILE="MobileO.xcodeproj/project.pbxproj"
-          
-          # 修改 iOS 版本
-          sed -i '' 's/IPHONEOS_DEPLOYMENT_TARGET = 18.2;/IPHONEOS_DEPLOYMENT_TARGET = 18.0;/g' "$PROJECT_FILE"
-          sed -i '' 's/IPHONEOS_DEPLOYMENT_TARGET = 18.1;/IPHONEOS_DEPLOYMENT_TARGET = 18.0;/g' "$PROJECT_FILE"
-          
-          # 禁用代码签名
-          sed -i '' 's/CODE_SIGN_STYLE = Automatic;/CODE_SIGN_STYLE = Manual;/g' "$PROJECT_FILE"
-          sed -i '' 's/DEVELOPMENT_TEAM = Q3GRH2LZ7S;/DEVELOPMENT_TEAM = "";/g' "$PROJECT_FILE"
-          
-          echo "=== 修改后的配置 ==="
-          grep -A2 "IPHONEOS_DEPLOYMENT_TARGET" "$PROJECT_FILE" | head -10
-          
-      - name: Build Archive
+          # 修改 iOS 版本 - 使用 18.0 因为 GitHub Actions 可能只有 18.0
+          sed -i '' 's/IPHONEOS_DEPLOYMENT_TARGET = 18.2;/IPHONEOS_DEPLOYMENT_TARGET = 18.0;/g' MobileO.xcodeproj/project.pbxproj
+          sed -i '' 's/IPHONEOS_DEPLOYMENT_TARGET = 18.1;/IPHONEOS_DEPLOYMENT_TARGET = 18.0;/g' MobileO.xcodeproj/project.pbxproj
+          sed -i '' 's/CODE_SIGN_STYLE = Automatic;/CODE_SIGN_STYLE = Manual;/g' MobileO.xcodeproj/project.pbxproj
+          sed -i '' 's/DEVELOPMENT_TEAM = Q3GRH2LZ7S;/DEVELOPMENT_TEAM = "";/g' MobileO.xcodeproj/project.pbxproj
+      
+      - name: Build IPA
         working-directory: Mobile-O-App/app
         run: |
-          xcodebuild clean archive \
+          # 分开执行 clean �?build
+          xcodebuild clean \
+            -project MobileO.xcodeproj \
+            -scheme MobileO \
+            2>&1 || true
+          
+          # 构建 .app - 禁用 Swift 6 严格并发检�?          xcodebuild build \
             -project MobileO.xcodeproj \
             -scheme MobileO \
             -configuration Release \
-            -archivePath MobileO.xcarchive \
             -sdk iphoneos \
+            -destination "generic/platform=iOS" \
+            -derivedDataPath DerivedData \
             CODE_SIGN_IDENTITY="" \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGNING_ALLOWED=NO \
@@ -50,108 +61,38 @@ jobs:
             ARCHS=arm64 \
             SWIFT_STRICT_CONCURRENCY=minimal \
             OTHER_SWIFT_FLAGS="-strict-concurrency=minimal" \
-            ALWAYS_EMBED_SWIFT_STANDARD_LIBRARIES=YES \
             2>&1 | tee build.log
           
-          if [ ! -d "MobileO.xcarchive" ]; then
-            echo "ERROR: Archive 失败"
-            tail -100 build.log
-            exit 1
-          fi
-          
-      - name: Package IPA for LiveContainer
-        working-directory: Mobile-O-App/app
-        run: |
-          APP_PATH=$(find MobileO.xcarchive -name "MobileO.app" -type d | head -1)
+          # 查找 .app 文件
+          APP_PATH=$(find DerivedData -name "MobileO.app" -type d 2>/dev/null | head -1)
           
           if [ -z "$APP_PATH" ]; then
-            echo "ERROR: 未找到 MobileO.app"
+            echo "ERROR: 未找�?MobileO.app，尝试查找任�?.app"
+            find . -name "*.app" -type d 2>/dev/null
+            cat build.log | tail -200
             exit 1
           fi
           
-          echo "=== 原始 App 内容 ==="
-          ls -la "$APP_PATH"
+          echo "找到 App: $APP_PATH"
           
-          # 创建 Payload 目录 (正确结构)
-          rm -rf Payload
+          # 打包 IPA
           mkdir -p Payload
-          
-          # 复制 .app 到 Payload
           cp -R "$APP_PATH" Payload/
+          rm -rf Payload/MobileO.app/_CodeSignature 2>/dev/null || true
+          zip -qr MobileO_Unsigned_iOS18.ipa Payload
           
-          # 验证结构
-          echo "=== Payload 目录 ==="
-          ls -la Payload/
-          echo "=== App 在 Payload 中 ==="
-          ls -la Payload/MobileO.app/
-          
-          # 彻底清理签名相关
-          rm -rf Payload/MobileO.app/_CodeSignature
-          rm -f Payload/MobileO.app/CodeResources
-          rm -f Payload/MobileO.app/embedded.mobileprovision 2>/dev/null || true
-          rm -f Payload/MobileO.app/*.mobileprovision 2>/dev/null || true
-          
-          # 确保 Frameworks 存在
-          mkdir -p Payload/MobileO.app/Frameworks
-          
-          # 检查 Swift 支持文件
-          echo "=== Swift 支持 ==="
-          ls -la Payload/MobileO.app/Frameworks/ | head -20
-          
-          # 检查 Info.plist 关键字段
-          echo "=== Info.plist 验证 ==="
-          plutil -p Payload/MobileO.app/Info.plist | grep -E "CFBundleIdentifier|CFBundleName|CFBundleExecutable|MinimumOSVersion"
-          
-          # 确保可执行文件存在且名称正确
-          if [ ! -f "Payload/MobileO.app/MobileO" ]; then
-            echo "ERROR: 可执行文件缺失"
-            ls -la Payload/MobileO.app/
-            exit 1
-          fi
-          
-          # 创建 IPA (标准方式)
-          zip -qr MobileO_LiveContainer_iOS18.ipa Payload
-          
-          echo "=== IPA 创建成功 ==="
-          ls -lh MobileO_LiveContainer_iOS18.ipa
-          
-          # 验证 IPA 结构
-          echo "=== IPA 内容 ==="
-          unzip -l MobileO_LiveContainer_iOS18.ipa | head -30
-          
-      - name: Final Verification
-        working-directory: Mobile-O-App/app
-        run: |
-          # 解压检查
-          rm -rf check
-          mkdir check && cd check
-          unzip -q ../MobileO_LiveContainer_iOS18.ipa
-          
-          echo "=== 验证结果 ==="
-          echo "Info.plist:"
-          plutil -p MobileO.app/Info.plist | grep -E "CFBundleIdentifier|CFBundleExecutable|CFBundleName"
-          
-          echo ""
-          echo "可执行文件架构:"
-          lipo -info MobileO.app/MobileO
-          
-          echo ""
-          echo "Swift 运行时:"
-          ls MobileO.app/Frameworks/ 2>/dev/null | grep -i swift || echo "使用系统 Swift 运行时"
-          
-          cd .. && rm -rf check
-          
+          echo "IPA 打包完成"
+          ls -lh MobileO_Unsigned_iOS18.ipa
+      
       - name: Upload IPA
         uses: actions/upload-artifact@v4
         with:
-          name: MobileO-LiveContainer-iOS18
-          path: Mobile-O-App/app/MobileO_LiveContainer_iOS18.ipa
+          name: MobileO-Unsigned-iOS18
+          path: Mobile-O-App/app/MobileO_Unsigned_iOS18.ipa
           
-      - name: Upload Debug Info (on failure)
+      - name: Upload Build Log (on failure)
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: debug-info
-          path: |
-            Mobile-O-App/app/build.log
-            Mobile-O-App/app/MobileO.xcarchive/
+          name: build-log
+          path: Mobile-O-App/app/build.log
