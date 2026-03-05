@@ -5,22 +5,41 @@ on:
   push:
     branches: [main, master]
 
+concurrency:
+  group: build-ios-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build:
-    runs-on: macos-15
+    runs-on: macos-latest
+    env:
+      APP_DIR: Mobile-O-App/app
+      XCODEPROJ: MobileO.xcodeproj
+      SCHEME: MobileO
+      CONFIGURATION: Release
+      DERIVED_DATA: ${{ github.workspace }}/build/DerivedData
+      BUILD_DIR: ${{ github.workspace }}/build
+
     steps:
-      - uses: actions/checkout@v4
-      
-      - name: Setup Xcode
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - name: Xcode version
+        run: xcodebuild -version
+
+      - name: List targets & schemes
+        shell: bash
         run: |
-          sudo xcode-select -s /Applications/Xcode_16.1.app/Contents/Developer
-          xcodebuild -version
-          sudo xcodebuild -downloadPlatform iOS || true
-      
+          set -euxo pipefail
+          xcodebuild -list -project "${APP_DIR}/${XCODEPROJ}"
+
       - name: Modify Project Settings
-        working-directory: Mobile-O-App/app
+        shell: bash
         run: |
-          PROJECT_FILE="MobileO.xcodeproj/project.pbxproj"
+          set -euxo pipefail
+          PROJECT_FILE="${APP_DIR}/${XCODEPROJ}/project.pbxproj"
           
           # 修改 iOS 版本
           sed -i '' 's/IPHONEOS_DEPLOYMENT_TARGET = 18.2;/IPHONEOS_DEPLOYMENT_TARGET = 18.0;/g' "$PROJECT_FILE"
@@ -29,91 +48,80 @@ jobs:
           # 禁用代码签名
           sed -i '' 's/CODE_SIGN_STYLE = Automatic;/CODE_SIGN_STYLE = Manual;/g' "$PROJECT_FILE"
           sed -i '' 's/DEVELOPMENT_TEAM = Q3GRH2LZ7S;/DEVELOPMENT_TEAM = "";/g' "$PROJECT_FILE"
-          
-          echo "=== 验证修改 ==="
-          grep "IPHONEOS_DEPLOYMENT_TARGET" "$PROJECT_FILE" | head -5
-      
-      - name: Build (using build command - like 75a48b0)
-        working-directory: Mobile-O-App/app
+
+      - name: Build unsigned .app
+        shell: bash
         run: |
-          # 使用 build 命令（75a48b0 成功版本的方式）
-          xcodebuild clean build \
-            -project MobileO.xcodeproj \
-            -scheme MobileO \
-            -configuration Release \
+          set -euxo pipefail
+          rm -rf "${BUILD_DIR}"
+          mkdir -p "${BUILD_DIR}"
+
+          # 构建（使用 build 而非 archive）
+          xcodebuild \
+            -project "${APP_DIR}/${XCODEPROJ}" \
+            -scheme "${SCHEME}" \
+            -configuration "${CONFIGURATION}" \
             -sdk iphoneos \
-            -destination "generic/platform=iOS" \
-            -derivedDataPath DerivedData \
-            CODE_SIGN_IDENTITY="" \
-            CODE_SIGNING_REQUIRED=NO \
+            -derivedDataPath "${DERIVED_DATA}" \
             CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
             IPHONEOS_DEPLOYMENT_TARGET=18.0 \
-            ONLY_ACTIVE_ARCH=NO \
-            ARCHS=arm64 \
-            SWIFT_VERSION=5 \
             SWIFT_STRICT_CONCURRENCY=minimal \
-            OTHER_SWIFT_FLAGS="-strict-concurrency=minimal -Xfrontend -disable-availability-checking" \
-            ALWAYS_EMBED_SWIFT_STANDARD_LIBRARIES=YES \
-            2>&1 | tee build.log
+            OTHER_SWIFT_FLAGS="-strict-concurrency=minimal" \
+            clean build \
+            | tee "${BUILD_DIR}/xcodebuild.log"
+
+          # 获取 App 路径
+          APP_PATH="${DERIVED_DATA}/Build/Products/${CONFIGURATION}-iphoneos/${SCHEME}.app"
+          test -d "$APP_PATH"
+          echo "APP_PATH=$APP_PATH" >> "$GITHUB_ENV"
           
-          # 查找 .app 文件
-          APP_PATH=$(find DerivedData -name "MobileO.app" -type d 2>/dev/null | head -1)
-          
-          if [ -z "$APP_PATH" ]; then
-            echo "ERROR: 未找到 MobileO.app"
-            find . -name "*.app" -type d 2>/dev/null
-            tail -100 build.log
-            exit 1
-          fi
-          
-          echo "=== 找到 .app ==="
-          echo "$APP_PATH"
-          ls -la "$APP_PATH"
-      
-      - name: Package IPA
-        working-directory: Mobile-O-App/app
-        run: |
-          # 查找构建好的 .app
-          APP_PATH=$(find DerivedData -name "MobileO.app" -type d 2>/dev/null | head -1)
-          
-          if [ -z "$APP_PATH" ]; then
-            echo "ERROR: 未找到 .app"
-            exit 1
-          fi
-          
-          echo "=== 检查 .app 结构 ==="
+          echo "=== 检查原始 .app ==="
           ls -la "$APP_PATH"
           
           echo "=== 检查 Frameworks ==="
-          ls -la "$APP_PATH/Frameworks" 2>/dev/null || echo "⚠️ 没有 Frameworks 目录！"
+          ls -la "$APP_PATH/Frameworks" 2>/dev/null || echo "⚠️ 没有 Frameworks 目录"
+
+      - name: Dump xcodebuild log on failure
+        if: failure()
+        shell: bash
+        run: |
+          echo "===== tail -n 400 build/xcodebuild.log ====="
+          tail -n 400 build/xcodebuild.log || true
+
+      - name: Package into IPA
+        shell: bash
+        run: |
+          set -euxo pipefail
           
-          # 创建 Payload
-          rm -rf Payload
+          # 创建标准的 Payload 目录结构
           mkdir -p Payload
           
-          # 复制 .app
+          # 将生成的 .app 复制进去
           cp -R "$APP_PATH" Payload/
           
           # 清理签名
-          rm -rf Payload/MobileO.app/_CodeSignature
-          rm -f Payload/MobileO.app/embedded.mobileprovision 2>/dev/null || true
+          rm -rf Payload/${SCHEME}.app/_CodeSignature
+          rm -f Payload/${SCHEME}.app/embedded.mobileprovision 2>/dev/null || true
           
-          # 创建 IPA
-          zip -qr MobileO_iOS18.ipa Payload
+          # 验证 Info.plist
+          echo "=== Info.plist ==="
+          plutil -p Payload/${SCHEME}.app/Info.plist | grep -E "CFBundleExecutable|CFBundleIdentifier|MinimumOSVersion"
           
-          echo "=== IPA 创建成功 ==="
-          ls -lh MobileO_iOS18.ipa
-      
-      - name: Upload IPA
+          # 验证 Frameworks
+          echo "=== Frameworks ==="
+          ls -la Payload/${SCHEME}.app/Frameworks/ 2>/dev/null | head -20
+          
+          # 压缩成 .ipa
+          zip -r MobileO-unsigned.ipa Payload
+          
+          echo "=== IPA 信息 ==="
+          ls -lah MobileO-unsigned.ipa
+
+      - name: Upload unsigned IPA artifact
         uses: actions/upload-artifact@v4
         with:
-          name: MobileO-iOS18-Full
-          path: Mobile-O-App/app/MobileO_iOS18.ipa
-          
-      - name: Upload Debug Info (on failure)
-        if: failure()
-        uses: actions/upload-artifact@v4
-        with:
-          name: build-debug
-          path: |
-            Mobile-O-App/app/build.log
+          name: MobileO-unsigned-ipa
+          path: MobileO-unsigned.ipa
+          if-no-files-found: error
