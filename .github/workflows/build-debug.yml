@@ -1,0 +1,66 @@
+name: Build Debug IPA with Diagnostics
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Setup and Build Debug Version
+        working-directory: Mobile-O-App/app
+        run: |
+          # 修改配置
+          sed -i '' 's/IPHONEOS_DEPLOYMENT_TARGET = 18.2;/IPHONEOS_DEPLOYMENT_TARGET = 18.0;/g' MobileO.xcodeproj/project.pbxproj
+          sed -i '' 's/CODE_SIGN_STYLE = Automatic;/CODE_SIGN_STYLE = Manual;/g' MobileO.xcodeproj/project.pbxproj
+          sed -i '' 's/DEVELOPMENT_TEAM = Q3GRH2LZ7S;/DEVELOPMENT_TEAM = "";/g' MobileO.xcodeproj/project.pbxproj
+          
+          # Debug 构建（包含更多调试信息）
+          xcodebuild clean archive \
+            -project MobileO.xcodeproj \
+            -scheme MobileO \
+            -configuration Debug \
+            -archivePath "build/MobileO.xcarchive" \
+            -sdk iphoneos \
+            -destination "generic/platform=iOS" \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO \
+            IPHONEOS_DEPLOYMENT_TARGET=18.0 \
+            ONLY_ACTIVE_ARCH=NO \
+            ARCHS=arm64 \
+            SWIFT_STRICT_CONCURRENCY=minimal \
+            OTHER_SWIFT_FLAGS="-strict-concurrency=minimal" \
+            ALWAYS_EMBED_SWIFT_STANDARD_LIBRARIES=YES \
+            DEBUG_INFORMATION_FORMAT=dwarf-with-dsym \
+            2>&1 | tee build.log
+          
+          # 打包
+          mkdir -p Payload
+          cp -R "build/MobileO.xcarchive/Products/Applications/MobileO.app" Payload/
+          rm -rf Payload/MobileO.app/_CodeSignature
+          
+          # 注入启动诊断
+          cat > Payload/MobileO.app/diagnose.txt << 'DIAGEOF'
+启动诊断信息:
+- 构建时间: $(date)
+- 构建配置: Debug
+- 目标 iOS: 18.0+
+- 架构: arm64
+
+如果启动失败，请检查:
+1. LiveContainer 是否最新版本
+2. iOS 版本是否 >= 18.0
+3. Frameworks 是否正确加载
+DIAGEOF
+          
+          zip -qr MobileO_Debug.ipa Payload
+          ls -lh MobileO_Debug.ipa
+          
+      - name: Upload Debug IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: MobileO-Debug-Diagnostic
+          path: Mobile-O-App/app/MobileO_Debug.ipa
