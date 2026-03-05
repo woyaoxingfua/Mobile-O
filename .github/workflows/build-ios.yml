@@ -56,7 +56,7 @@ jobs:
           rm -rf "${BUILD_DIR}"
           mkdir -p "${BUILD_DIR}"
 
-          # 构建（使用 build 而非 archive）
+          # 构建（确保嵌入 Swift 库和依赖）
           xcodebuild \
             -project "${APP_DIR}/${XCODEPROJ}" \
             -scheme "${SCHEME}" \
@@ -69,6 +69,8 @@ jobs:
             IPHONEOS_DEPLOYMENT_TARGET=18.0 \
             SWIFT_STRICT_CONCURRENCY=minimal \
             OTHER_SWIFT_FLAGS="-strict-concurrency=minimal" \
+            ALWAYS_EMBED_SWIFT_STANDARD_LIBRARIES=YES \
+            LD_RUNPATH_SEARCH_PATHS="@executable_path/Frameworks" \
             clean build \
             | tee "${BUILD_DIR}/xcodebuild.log"
 
@@ -101,6 +103,25 @@ jobs:
           # 将生成的 .app 复制进去
           cp -R "$APP_PATH" Payload/
           
+          # 确保 Frameworks 目录存在并检查内容
+          echo "=== 原始 Frameworks ==="
+          ls -la Payload/${SCHEME}.app/Frameworks/ 2>/dev/null || echo "⚠️ 没有 Frameworks 目录！"
+          
+          # 从 DerivedData 查找并复制所有 Frameworks（如果 Xcode 没有自动嵌入）
+          echo "=== 从 DerivedData 查找 Frameworks ==="
+          find "${DERIVED_DATA}" -name "*.framework" -type d 2>/dev/null | while read framework; do
+            framework_name=$(basename "$framework")
+            # 避免重复复制系统框架
+            if [[ ! "$framework_name" =~ ^(UIKit|Foundation|Core|Swift|libswift).*$ ]]; then
+              echo "发现框架: $framework_name"
+              if [ ! -d "Payload/${SCHEME}.app/Frameworks/$framework_name" ]; then
+                echo "  -> 复制到 App"
+                mkdir -p "Payload/${SCHEME}.app/Frameworks"
+                cp -R "$framework" "Payload/${SCHEME}.app/Frameworks/"
+              fi
+            fi
+          done
+          
           # 清理签名
           rm -rf Payload/${SCHEME}.app/_CodeSignature
           rm -f Payload/${SCHEME}.app/embedded.mobileprovision 2>/dev/null || true
@@ -109,9 +130,13 @@ jobs:
           echo "=== Info.plist ==="
           plutil -p Payload/${SCHEME}.app/Info.plist | grep -E "CFBundleExecutable|CFBundleIdentifier|MinimumOSVersion"
           
-          # 验证 Frameworks
-          echo "=== Frameworks ==="
-          ls -la Payload/${SCHEME}.app/Frameworks/ 2>/dev/null | head -20
+          # 验证最终 Frameworks
+          echo "=== 最终 Frameworks ==="
+          ls -la Payload/${SCHEME}.app/Frameworks/ 2>/dev/null | head -30
+          
+          # 计算大小
+          echo "=== App 大小 ==="
+          du -sh Payload/${SCHEME}.app
           
           # 压缩成 .ipa
           zip -r MobileO-unsigned.ipa Payload
