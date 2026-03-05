@@ -15,43 +15,60 @@ jobs:
         run: |
           sudo xcode-select -s /Applications/Xcode_16.1.app/Contents/Developer
           xcodebuild -version
+          
+          # 安装 iOS 平台
+          sudo xcodebuild -downloadPlatform iOS || true
+          
+          # 检查可用的 SDKs
+          echo "=== Available SDKs ==="
           xcodebuild -showsdks
+          
+          # 检查可用的 destinations
+          echo "=== Available Destinations ==="
+          cd Mobile-O-App/app
+          xcodebuild -project MobileO.xcodeproj -scheme MobileO -showdestinations 2>&1 | head -50 || true
       
       - name: Modify Project Settings
         working-directory: Mobile-O-App/app
         run: |
-          # 修改 iOS 版本和签名设置
-          sed -i '' 's/IPHONEOS_DEPLOYMENT_TARGET = 18.2;/IPHONEOS_DEPLOYMENT_TARGET = 18.1;/g' MobileO.xcodeproj/project.pbxproj
-          sed -i '' 's/IPHONEOS_DEPLOYMENT_TARGET = 18.0;/IPHONEOS_DEPLOYMENT_TARGET = 18.1;/g' MobileO.xcodeproj/project.pbxproj
+          # 修改 iOS 版本 - 使用 18.0 因为 GitHub Actions 可能只有 18.0
+          sed -i '' 's/IPHONEOS_DEPLOYMENT_TARGET = 18.2;/IPHONEOS_DEPLOYMENT_TARGET = 18.0;/g' MobileO.xcodeproj/project.pbxproj
+          sed -i '' 's/IPHONEOS_DEPLOYMENT_TARGET = 18.1;/IPHONEOS_DEPLOYMENT_TARGET = 18.0;/g' MobileO.xcodeproj/project.pbxproj
           sed -i '' 's/CODE_SIGN_STYLE = Automatic;/CODE_SIGN_STYLE = Manual;/g' MobileO.xcodeproj/project.pbxproj
           sed -i '' 's/DEVELOPMENT_TEAM = Q3GRH2LZ7S;/DEVELOPMENT_TEAM = "";/g' MobileO.xcodeproj/project.pbxproj
       
       - name: Build IPA
         working-directory: Mobile-O-App/app
         run: |
-          # 使用 xcodebuild 直接构建 .app，然后打包成 IPA
-          xcodebuild clean build \
+          # 分开执行 clean 和 build
+          xcodebuild clean \
+            -project MobileO.xcodeproj \
+            -scheme MobileO \
+            2>&1 || true
+          
+          # 构建 .app
+          xcodebuild build \
             -project MobileO.xcodeproj \
             -scheme MobileO \
             -configuration Release \
             -sdk iphoneos \
+            -destination "generic/platform=iOS" \
             -derivedDataPath DerivedData \
             CODE_SIGN_IDENTITY="" \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGNING_ALLOWED=NO \
-            IPHONEOS_DEPLOYMENT_TARGET=18.1 \
+            IPHONEOS_DEPLOYMENT_TARGET=18.0 \
             ONLY_ACTIVE_ARCH=NO \
             ARCHS=arm64 \
             2>&1 | tee build.log
           
-          BUILD_STATUS=${PIPESTATUS[0]}
-          
-          # 即使构建有警告，也尝试找到 .app 文件
+          # 查找 .app 文件
           APP_PATH=$(find DerivedData -name "MobileO.app" -type d 2>/dev/null | head -1)
           
           if [ -z "$APP_PATH" ]; then
-            echo "ERROR: 未找到 MobileO.app"
-            cat build.log | tail -100
+            echo "ERROR: 未找到 MobileO.app，尝试查找任何 .app"
+            find . -name "*.app" -type d 2>/dev/null
+            cat build.log | tail -200
             exit 1
           fi
           
@@ -61,16 +78,16 @@ jobs:
           mkdir -p Payload
           cp -R "$APP_PATH" Payload/
           rm -rf Payload/MobileO.app/_CodeSignature 2>/dev/null || true
-          zip -qr MobileO_Unsigned_iOS18.1.ipa Payload
+          zip -qr MobileO_Unsigned_iOS18.ipa Payload
           
           echo "IPA 打包完成"
-          ls -lh MobileO_Unsigned_iOS18.1.ipa
+          ls -lh MobileO_Unsigned_iOS18.ipa
       
       - name: Upload IPA
         uses: actions/upload-artifact@v4
         with:
-          name: MobileO-Unsigned-iOS18.1
-          path: Mobile-O-App/app/MobileO_Unsigned_iOS18.1.ipa
+          name: MobileO-Unsigned-iOS18
+          path: Mobile-O-App/app/MobileO_Unsigned_iOS18.ipa
           
       - name: Upload Build Log (on failure)
         if: failure()
