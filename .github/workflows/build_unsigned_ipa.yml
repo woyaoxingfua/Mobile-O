@@ -27,9 +27,21 @@ jobs:
         xcodebuild -version
         xcode-select -p
         
-    - name: Setup Xcode Command Line Tools
+    - name: Setup Xcode and Install iOS 18.1 SDK
       run: |
-        xcode-select --install 2>/dev/null || true
+        # 显示可用的 SDKs
+        echo "=== Available SDKs ==="
+        xcodebuild -showsdks
+        
+        # 安装 iOS 18.1 平台
+        sudo xcodebuild -downloadPlatform iOS -buildVersion 18.1 || true
+        
+        # 或者尝试安装最新的 iOS 平台
+        sudo xcodebuild -runFirstLaunch
+        
+        # 显示安装后的 SDKs
+        echo "=== SDKs after setup ==="
+        xcodebuild -showsdks
         
     - name: Pre-build Setup
       run: |
@@ -82,11 +94,11 @@ jobs:
         rm -rf build
         mkdir -p build
         
-        # 构建 Archive
+        # 构建 Archive (使用 sdk 参数而不是 destination)
         xcodebuild archive \
           -project MobileO.xcodeproj \
           -scheme MobileO \
-          -destination "generic/platform=iOS" \
+          -sdk iphoneos \
           -archivePath "build/MobileO.xcarchive" \
           IPHONEOS_DEPLOYMENT_TARGET=18.1 \
           CODE_SIGNING_REQUIRED=NO \

@@ -26,10 +26,15 @@ jobs:
       with:
         submodules: recursive
         
-    - name: Select Xcode Version
+    - name: Select Xcode Version and Install iOS SDK
       run: |
         sudo xcode-select -s /Applications/Xcode_16.app/Contents/Developer
         xcodebuild -version
+        
+        # 显示并安装 iOS SDK
+        xcodebuild -showsdks
+        sudo xcodebuild -downloadPlatform iOS -buildVersion 18.1 || true
+        sudo xcodebuild -runFirstLaunch
         
     - name: Modify Project for Unsigned Build
       working-directory: Mobile-O-App/app
@@ -60,7 +65,7 @@ jobs:
           -project MobileO.xcodeproj \
           -scheme MobileO \
           -configuration "$CONFIG" \
-          -destination "generic/platform=iOS" \
+          -sdk iphoneos \
           -derivedDataPath "build/DerivedData" \
           CONFIGURATION_BUILD_DIR="$BUILD_DIR" \
           CODE_SIGNING_REQUIRED=NO \
