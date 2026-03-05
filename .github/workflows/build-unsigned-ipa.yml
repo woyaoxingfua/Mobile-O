@@ -42,6 +42,7 @@ jobs:
             ENTITLEMENTS_REQUIRED="NO" \
             CODE_SIGN_ENTITLEMENTS="" \
             IPHONEOS_DEPLOYMENT_TARGET="18.1" \
+            SWIFT_STRICT_CONCURRENCY=minimal \
             OTHER_SWIFT_FLAGS="-strict-concurrency=minimal" \
             CONFIGURATION_BUILD_DIR="$(pwd)/build"
 

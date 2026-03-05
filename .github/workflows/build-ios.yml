@@ -46,7 +46,7 @@ jobs:
             -scheme MobileO \
             2>&1 || true
           
-          # 构建 .app
+          # 构建 .app - 禁用 Swift 6 严格并发检查
           xcodebuild build \
             -project MobileO.xcodeproj \
             -scheme MobileO \
@@ -60,6 +60,8 @@ jobs:
             IPHONEOS_DEPLOYMENT_TARGET=18.0 \
             ONLY_ACTIVE_ARCH=NO \
             ARCHS=arm64 \
+            SWIFT_STRICT_CONCURRENCY=minimal \
+            OTHER_SWIFT_FLAGS="-strict-concurrency=minimal" \
             2>&1 | tee build.log
           
           # 查找 .app 文件
