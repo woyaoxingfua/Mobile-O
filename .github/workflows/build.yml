@@ -1,0 +1,206 @@
+name: Build iOS IPA (Archive, Diagnostics, unsigned IPA)
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main, master]
+
+concurrency:
+  group: build-ios-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: macos-latest
+
+    env:
+      APP_DIR: Mobile-O-App/app
+      XCODEPROJ: MobileO.xcodeproj
+      SCHEME: MobileO
+      CONFIGURATION: Release
+      ARCHIVE_PATH: build/MobileO.xcarchive
+      DERIVED_PATH: build/DerivedData
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - name: Show Xcode & SDK versions
+        run: |
+          xcodebuild -version
+          xcodebuild -showsdks
+
+      - name: Install tools (optional diagnostics)
+        run: |
+          # ensure lipo, otool etc are available (they are on macos)
+          which lipo || true
+          which otool || true
+
+      - name: Build: Archive (prefer archive to preserve embed/plugIns)
+        shell: bash
+        run: |
+          set -euxo pipefail
+          PROJECT_PATH="${APP_DIR}/${XCODEPROJ}"
+          mkdir -p build
+
+          echo "=== xcodebuild archive (no codesign flags to avoid signing on runner) ==="
+          # Prefer archive: keeps embedded frameworks / extensions processed by Xcode.
+          xcodebuild clean archive \
+            -project "$PROJECT_PATH" \
+            -scheme "${SCHEME}" \
+            -configuration "${CONFIGURATION}" \
+            -archivePath "${ARCHIVE_PATH}" \
+            -sdk iphoneos \
+            -destination "generic/platform=iOS" \
+            -clonedSourcePackagesDirPath "SourcePackages" \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO \
+            IPHONEOS_DEPLOYMENT_TARGET=18.0 \
+            SWIFT_STRICT_CONCURRENCY=minimal \
+            OTHER_SWIFT_FLAGS="-strict-concurrency=minimal -suppress-warnings" \
+            ALWAYS_EMBED_SWIFT_STANDARD_LIBRARIES=YES \
+            LD_RUNPATH_SEARCH_PATHS="@executable_path/Frameworks" \
+            2>&1 | tee build.log || {
+              echo "Archive failed — show brief tail of build.log and try fallback build"
+              tail -200 build.log || true
+
+              # Fallback: plain build (less preferred; may not embed extensions the same)
+              xcodebuild clean build \
+                -project "$PROJECT_PATH" \
+                -scheme "${SCHEME}" \
+                -configuration "${CONFIGURATION}" \
+                -sdk iphoneos \
+                -derivedDataPath "${DERIVED_PATH}" \
+                -clonedSourcePackagesDirPath "SourcePackages" \
+                CODE_SIGN_IDENTITY="" \
+                CODE_SIGNING_REQUIRED=NO \
+                CODE_SIGNING_ALLOWED=NO \
+                IPHONEOS_DEPLOYMENT_TARGET=18.0 \
+                SWIFT_STRICT_CONCURRENCY=minimal \
+                OTHER_SWIFT_FLAGS="-strict-concurrency=minimal -suppress-warnings" \
+                ALWAYS_EMBED_SWIFT_STANDARD_LIBRARIES=YES \
+                2>&1 | tee -a build.log
+            }
+
+      - name: Find built .app (archive or derived)
+        shell: bash
+        run: |
+          set -euxo pipefail
+          # prefer the .app inside xcarchive
+          if [ -d "${ARCHIVE_PATH}" ]; then
+            APP_PATH="${ARCHIVE_PATH}/Products/Applications/${SCHEME}.app"
+            echo "Using archived .app: ${APP_PATH}"
+          else
+            APP_PATH=$(find "${DERIVED_PATH}" -type d -name "${SCHEME}.app" -print -quit || true)
+            echo "Using derived .app: ${APP_PATH}"
+          fi
+
+          if [ -z "${APP_PATH}" ] || [ ! -d "${APP_PATH}" ]; then
+            echo "ERROR: .app not found. Dumping build/ and failing for debugging."
+            find build -maxdepth 6 -ls || true
+            echo "=== build.log tail ==="
+            tail -200 build.log || true
+            exit 1
+          fi
+
+          echo "=== APP_PATH: ${APP_PATH} ==="
+          du -sh "${APP_PATH}" || true
+          echo "=== top-level files ==="
+          ls -la "${APP_PATH}" | sed -n '1,200p' || true
+
+          # Save APP_PATH for next steps
+          echo "APP_PATH=${APP_PATH}" >> $GITHUB_ENV
+
+      - name: Diagnostics on the .app binary and embedded libs
+        shell: bash
+        run: |
+          set -euxo pipefail
+          APP_PATH="${APP_PATH:-$APP_PATH}"
+          BIN="${APP_PATH}/${SCHEME}"
+
+          echo "=== Binary file info ==="
+          file "$BIN" || true
+          echo "=== lipo -info ==="
+          lipo -info "$BIN" || true
+
+          echo "=== otool -L (linked dynamic libs) ==="
+          otool -L "$BIN" || true
+
+          echo "=== Frameworks directory ==="
+          if [ -d "${APP_PATH}/Frameworks" ]; then
+            du -sh "${APP_PATH}/Frameworks" || true
+            ls -la "${APP_PATH}/Frameworks" | sed -n '1,200p' || true
+          else
+            echo "No Frameworks directory found"
+          fi
+
+          echo "=== PlugIns (app extensions) ==="
+          if [ -d "${APP_PATH}/PlugIns" ]; then
+            ls -la "${APP_PATH}/PlugIns" | sed -n '1,200p' || true
+          else
+            echo "No PlugIns directory"
+          fi
+
+          echo "=== entitlements (codesign -d) ==="
+          # codesign -d will fail on unsigned apps; ignore errors but show whatever we can
+          set +e
+          codesign -d --entitlements :- "${APP_PATH}" 2>&1 || true
+          set -e
+
+          echo "=== Info.plist keys (CFBundleExecutable / CFBundleIdentifier) ==="
+          /usr/libexec/PlistBuddy -c "Print :CFBundleExecutable" "${APP_PATH}/Info.plist" || true
+          /usr/libexec/PlistBuddy -c "Print :CFBundleIdentifier" "${APP_PATH}/Info.plist" || true
+
+          # Persist a short manifest for debugging
+          mkdir -p diagnostics
+          {
+            echo "=== lipo -info ==="
+            lipo -info "$BIN" || file "$BIN"
+            echo
+            echo "=== list frameworks ==="
+            ls -la "${APP_PATH}/Frameworks" 2>/dev/null || true
+            echo
+            echo "=== list plugins ==="
+            ls -la "${APP_PATH}/PlugIns" 2>/dev/null || true
+          } > diagnostics/app-diagnostics.txt
+
+      - name: Create unsigned IPA (Payload zip)
+        shell: bash
+        run: |
+          set -euxo pipefail
+          APP_PATH="${APP_PATH:-$APP_PATH}"
+          WORKDIR="$(pwd)/payload_work"
+          mkdir -p "${WORKDIR}"
+          rm -rf Payload || true
+          mkdir -p Payload
+          cp -R "${APP_PATH}" "Payload/"
+
+          # remove signatures/provisioning to make it unsigned (so it can be re-signed later)
+          rm -rf "Payload/${SCHEME}.app/_CodeSignature" || true
+          rm -f "Payload/${SCHEME}.app/embedded.mobileprovision" || true
+
+          echo "=== Check swift libs / dylibs inside app (showing up to 50) ==="
+          find "Payload/${SCHEME}.app" -maxdepth 4 -type f \( -name "*.dylib" -o -name "libswift*" \) -print | head -50 || true
+
+          ZIP_NAME="${SCHEME}-unsigned.ipa"
+          rm -f "${ZIP_NAME}"
+          zip -r "${ZIP_NAME}" Payload >/dev/null
+          ls -lh "${ZIP_NAME}" || true
+
+      - name: Upload artifacts (IPA + logs)
+        uses: actions/upload-artifact@v4
+        with:
+          name: mobileo-unsigned-ipa-and-logs
+          path: |
+            ${SCHEME}-unsigned.ipa
+            build.log
+            diagnostics/app-diagnostics.txt
+          if-no-files-found: error
+
+      - name: Debug output (last resort)
+        if: failure()
+        run: |
+          echo "==== Workflow failed. See uploaded artifacts (mobileo-unsigned-ipa-and-logs) ===="
