@@ -32,29 +32,6 @@ jobs:
           xcodebuild -version
           xcodebuild -showsdks
 
-      - name: Setup Self-Signed Certificate
-        run: |
-          # 创建临时用于签名的自签名证书
-          # 这样可以欺骗 Xcode 执行完整的 Embed Frameworks 流程
-          
-          # 1. 创建 Keychain
-          security create-keychain -p "" build.keychain
-          security list-keychains -s build.keychain
-          security default-keychain -s build.keychain
-          security unlock-keychain -p "" build.keychain
-          security set-keychain-settings -t 3600 -u build.keychain
-          
-          # 2. 生成证书
-          openssl req -x509 -newkey rsa:2048 -keyout key.pem -out cert.pem -days 365 -nodes -subj "/CN=MobileO Self Signed"
-          openssl pkcs12 -export -out cert.p12 -inkey key.pem -in cert.pem -passout pass:password
-          
-          # 3. 导入 Keychain
-          security import cert.p12 -k build.keychain -P password -T /usr/bin/codesign
-          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "" build.keychain
-          
-          # 4. 验证
-          security find-identity -v -p codesigning build.keychain
-
       - name: Modify Project Settings
         shell: bash
         run: |
@@ -64,22 +41,22 @@ jobs:
           sed -i '' 's/IPHONEOS_DEPLOYMENT_TARGET = 18.2;/IPHONEOS_DEPLOYMENT_TARGET = 18.0;/g' "$PROJECT_FILE"
           sed -i '' 's/IPHONEOS_DEPLOYMENT_TARGET = 18.1;/IPHONEOS_DEPLOYMENT_TARGET = 18.0;/g' "$PROJECT_FILE"
           
-          # 修改签名配置：使用 Manual 并在构建命令中指定自签名证书
+          # 修改签名配置：使用 Manual
           sed -i '' 's/CODE_SIGN_STYLE = Automatic;/CODE_SIGN_STYLE = Manual;/g' "$PROJECT_FILE"
           sed -i '' 's/DEVELOPMENT_TEAM = [^;]*;/DEVELOPMENT_TEAM = "";/g' "$PROJECT_FILE"
           
           echo "=== 验证配置 ==="
           grep "IPHONEOS_DEPLOYMENT_TARGET" "$PROJECT_FILE" | head -3
 
-      - name: Build: Archive with proper code signing
+      - name: Build Archive
         shell: bash
         run: |
           set -euxo pipefail
           PROJECT_PATH="${APP_DIR}/${XCODEPROJ}"
           mkdir -p build
 
-          echo "=== xcodebuild archive with self-signed certificate ==="
-          # 关键点：使用自签名证书允许 Xcode 执行 Embed Frameworks 步骤
+          echo "=== xcodebuild archive with ad-hoc signing ==="
+          # 使用 Ad-hoc 签名 (-) 确保 Xcode 执行 Embed Frameworks 步骤
           xcodebuild clean archive \
             -project "$PROJECT_PATH" \
             -scheme "${SCHEME}" \
@@ -89,7 +66,7 @@ jobs:
             -destination "generic/platform=iOS" \
             -clonedSourcePackagesDirPath "SourcePackages" \
             CODE_SIGN_STYLE="Manual" \
-            CODE_SIGN_IDENTITY="MobileO Self Signed" \
+            CODE_SIGN_IDENTITY="-" \
             PROVISIONING_PROFILE_SPECIFIER="" \
             CODE_SIGNING_REQUIRED=YES \
             CODE_SIGNING_ALLOWED=YES \
@@ -104,36 +81,28 @@ jobs:
             DEPLOYMENT_POSTPROCESSING=YES \
             2>&1 | tee build.log
 
-      - name: Find built .app (archive or derived)
+      - name: Find built .app
         shell: bash
         run: |
           set -euxo pipefail
-          # prefer the .app inside xcarchive
           if [ -d "${ARCHIVE_PATH}" ]; then
             APP_PATH="${ARCHIVE_PATH}/Products/Applications/${SCHEME}.app"
             echo "Using archived .app: ${APP_PATH}"
           else
-            APP_PATH=$(find "${DERIVED_PATH}" -type d -name "${SCHEME}.app" -print -quit || true)
-            echo "Using derived .app: ${APP_PATH}"
+            echo "ERROR: Archive not found"
+            exit 1
           fi
 
-          if [ -z "${APP_PATH}" ] || [ ! -d "${APP_PATH}" ]; then
-            echo "ERROR: .app not found. Dumping build/ and failing for debugging."
-            find build -maxdepth 6 -ls || true
-            echo "=== build.log tail ==="
-            tail -200 build.log || true
+          if [ ! -d "${APP_PATH}" ]; then
+            echo "ERROR: .app not found."
             exit 1
           fi
 
           echo "=== APP_PATH: ${APP_PATH} ==="
           du -sh "${APP_PATH}" || true
-          echo "=== top-level files ==="
-          ls -la "${APP_PATH}" | sed -n '1,200p' || true
-
-          # Save APP_PATH for next steps
           echo "APP_PATH=${APP_PATH}" >> $GITHUB_ENV
 
-      - name: Diagnostics on the .app binary and embedded libs
+      - name: Diagnostics on the .app
         shell: bash
         run: |
           set -euxo pipefail
@@ -145,75 +114,47 @@ jobs:
           echo "=== lipo -info ==="
           lipo -info "$BIN" || true
 
-          echo "=== otool -L (linked dynamic libs) ==="
-          otool -L "$BIN" || true
-
           echo "=== Frameworks directory ==="
           if [ -d "${APP_PATH}/Frameworks" ]; then
             du -sh "${APP_PATH}/Frameworks" || true
-            ls -la "${APP_PATH}/Frameworks" | sed -n '1,200p' || true
+            ls -la "${APP_PATH}/Frameworks"
           else
             echo "No Frameworks directory found - THIS IS A PROBLEM!"
             exit 1
           fi
 
-          echo "=== PlugIns (app extensions) ==="
-          if [ -d "${APP_PATH}/PlugIns" ]; then
-            ls -la "${APP_PATH}/PlugIns" | sed -n '1,200p' || true
-          else
-            echo "No PlugIns directory"
-          fi
+          echo "=== PlugIns ==="
+          ls -la "${APP_PATH}/PlugIns" 2>/dev/null || echo "No PlugIns"
 
-          echo "=== Swift libraries ==="
-          find "${APP_PATH}" -name "libswift*.dylib" -o -name "*.swiftmodule" | head -20 || true
-
-          echo "=== Info.plist keys (CFBundleExecutable / CFBundleIdentifier) ==="
-          /usr/libexec/PlistBuddy -c "Print :CFBundleExecutable" "${APP_PATH}/Info.plist" || true
-          /usr/libexec/PlistBuddy -c "Print :CFBundleIdentifier" "${APP_PATH}/Info.plist" || true
-
-          # Persist a short manifest for debugging
           mkdir -p diagnostics
           {
-            echo "=== lipo -info ==="
-            lipo -info "$BIN" || file "$BIN"
-            echo
-            echo "=== list frameworks ==="
-            ls -la "${APP_PATH}/Frameworks" 2>/dev/null || true
-            echo
-            echo "=== list plugins ==="
-            ls -la "${APP_PATH}/PlugIns" 2>/dev/null || true
+            echo "=== Frameworks ==="
+            ls -la "${APP_PATH}/Frameworks"
           } > diagnostics/app-diagnostics.txt
 
-      - name: Create unsigned IPA (Payload zip)
+      - name: Create unsigned IPA
         shell: bash
         run: |
           set -euxo pipefail
           APP_PATH="${APP_PATH:-$APP_PATH}"
-          WORKDIR="$(pwd)/payload_work"
-          mkdir -p "${WORKDIR}"
-          rm -rf Payload || true
+          rm -rf Payload
           mkdir -p Payload
           cp -R "${APP_PATH}" "Payload/"
 
-          # 移除签名 (因为这是自签名的，由于没有 Profile，iOS 无论如何都不会信任)
-          rm -rf "Payload/${SCHEME}.app/_CodeSignature" || true
-          rm -f "Payload/${SCHEME}.app/embedded.mobileprovision" || true
-          
-          # 移除可执行文件的签名（如果存在）
+          # 移除签名
+          rm -rf "Payload/${SCHEME}.app/_CodeSignature"
+          rm -f "Payload/${SCHEME}.app/embedded.mobileprovision"
           codesign --remove-signature "Payload/${SCHEME}.app/${SCHEME}" 2>/dev/null || true
 
-          echo "=== Check swift libs / dylibs inside app (showing up to 50) ==="
-          find "Payload/${SCHEME}.app" -maxdepth 4 -type f \( -name "*.dylib" -o -name "libswift*" \) -print | head -50 || true
-          
-          echo "=== Final .app size ==="
-          du -sh "Payload/${SCHEME}.app"
+          echo "=== Swift libraries ==="
+          find "Payload/${SCHEME}.app" -name "*.dylib" -o -name "*.swiftmodule" | head -20 || true
 
           ZIP_NAME="${SCHEME}-unsigned.ipa"
           rm -f "${ZIP_NAME}"
-          zip -r "${ZIP_NAME}" Payload >/dev/null
-          ls -lh "${ZIP_NAME}" || true
+          zip -r "${ZIP_NAME}" Payload
+          ls -lh "${ZIP_NAME}"
 
-      - name: Upload artifacts (IPA + logs)
+      - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
           name: mobileo-unsigned-ipa-and-logs
@@ -223,7 +164,8 @@ jobs:
             diagnostics/app-diagnostics.txt
           if-no-files-found: error
 
-      - name: Debug output (last resort)
+      - name: Debug output on failure
         if: failure()
         run: |
-          echo "==== Workflow failed. See uploaded artifacts (mobileo-unsigned-ipa-and-logs) ===="
+          echo "==== Workflow failed ===="
+          cat build.log | tail -100
