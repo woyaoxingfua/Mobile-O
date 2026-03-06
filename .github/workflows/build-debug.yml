@@ -9,6 +9,23 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       
+      - name: Setup Self-Signed Certificate
+        run: |
+          # 创建临时用于签名的自签名证书
+          security create-keychain -p "" build.keychain
+          security list-keychains -s build.keychain
+          security default-keychain -s build.keychain
+          security unlock-keychain -p "" build.keychain
+          security set-keychain-settings -t 3600 -u build.keychain
+          
+          openssl req -x509 -newkey rsa:2048 -keyout key.pem -out cert.pem -days 365 -nodes -subj "/CN=MobileO Self Signed"
+          openssl pkcs12 -export -out cert.p12 -inkey key.pem -in cert.pem -passout pass:password
+          
+          security import cert.p12 -k build.keychain -P password -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "" build.keychain
+          
+          security find-identity -v -p codesigning build.keychain
+      
       - name: Setup and Build Debug Version
         working-directory: Mobile-O-App/app
         run: |
@@ -18,6 +35,7 @@ jobs:
           sed -i '' 's/DEVELOPMENT_TEAM = Q3GRH2LZ7S;/DEVELOPMENT_TEAM = "";/g' MobileO.xcodeproj/project.pbxproj
           
           # Debug 构建（包含更多调试信息）
+          # 使用自签名证书确保 Frameworks 被正确嵌入
           xcodebuild clean archive \
             -project MobileO.xcodeproj \
             -scheme MobileO \
@@ -25,22 +43,32 @@ jobs:
             -archivePath "build/MobileO.xcarchive" \
             -sdk iphoneos \
             -destination "generic/platform=iOS" \
-            CODE_SIGN_IDENTITY="" \
-            CODE_SIGNING_REQUIRED=NO \
-            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGN_STYLE="Manual" \
+            CODE_SIGN_IDENTITY="MobileO Self Signed" \
+            PROVISIONING_PROFILE_SPECIFIER="" \
+            CODE_SIGNING_REQUIRED=YES \
+            CODE_SIGNING_ALLOWED=YES \
             IPHONEOS_DEPLOYMENT_TARGET=18.0 \
-            ONLY_ACTIVE_ARCH=NO \
+            ONLY_ACTIVE_ARCH=YES \
             ARCHS=arm64 \
             SWIFT_STRICT_CONCURRENCY=minimal \
             OTHER_SWIFT_FLAGS="-strict-concurrency=minimal" \
-            ALWAYS_EMBED_SWIFT_STANDARD_LIBRARIES=YES \
+            ALWAYS_EMBED_SWIFT_STANDARD_LIBRARIES=NO \
+            LD_RUNPATH_SEARCH_PATHS="@executable_path/Frameworks" \
             DEBUG_INFORMATION_FORMAT=dwarf-with-dsym \
             2>&1 | tee build.log
+          
+          # 检查 Frameworks 是否正确嵌入
+          APP_PATH="build/MobileO.xcarchive/Products/Applications/MobileO.app"
+          echo "=== 检查 Frameworks ==="
+          ls -la "$APP_PATH/Frameworks" || echo "WARNING: Frameworks 目录缺失!"
           
           # 打包
           mkdir -p Payload
           cp -R "build/MobileO.xcarchive/Products/Applications/MobileO.app" Payload/
           rm -rf Payload/MobileO.app/_CodeSignature
+          rm -f Payload/MobileO.app/embedded.mobileprovision
+          codesign --remove-signature "Payload/MobileO.app/MobileO" 2>/dev/null || true
           
           # 注入启动诊断
           cat > Payload/MobileO.app/diagnose.txt << 'DIAGEOF'

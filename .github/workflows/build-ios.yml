@@ -11,7 +11,7 @@ concurrency:
 
 jobs:
   build:
-    runs-on: macos-latest
+    runs-on: macos-15
     env:
       APP_DIR: Mobile-O-App/app
       XCODEPROJ: MobileO.xcodeproj
@@ -91,11 +91,15 @@ jobs:
             CODE_SIGNING_REQUIRED=YES \
             CODE_SIGNING_ALLOWED=YES \
             IPHONEOS_DEPLOYMENT_TARGET=18.0 \
+            ONLY_ACTIVE_ARCH=YES \
+            ARCHS=arm64 \
             SWIFT_STRICT_CONCURRENCY=minimal \
             SWIFT_TREAT_WARNINGS_AS_ERRORS=NO \
             OTHER_SWIFT_FLAGS="-strict-concurrency=minimal -Xfrontend -disable-availability-checking -suppress-warnings" \
-            ALWAYS_EMBED_SWIFT_STANDARD_LIBRARIES=YES \
+            ALWAYS_EMBED_SWIFT_STANDARD_LIBRARIES=NO \
             LD_RUNPATH_SEARCH_PATHS="@executable_path/Frameworks" \
+            STRIP_INSTALLED_PRODUCT=YES \
+            DEPLOYMENT_POSTPROCESSING=YES \
             2>&1 | tee build.log
 
       - name: Export and Package IPA
@@ -122,15 +126,11 @@ jobs:
           cp -R "$APP_PATH" Payload/
           
           # 移除签名 (因为这是自签名的，由于没有 Profile，iOS 无论如何都不会信任)
-          # 对于 LiveContainer/TrollStore，通常需要移除签名或伪签名
-          # 这里我们移除 _CodeSignature 文件夹
           rm -rf Payload/${SCHEME}.app/_CodeSignature
           rm -f Payload/${SCHEME}.app/embedded.mobileprovision
           
-          # 重新伪签名 (Ad-hoc) 以确保完整性校验 (可选，但在某些工具中更好)
-          # codesign -s - --force --deep Payload/${SCHEME}.app
-          # 用户要求 "unsigned" 这里的定义可能是不包含 Apple 签名，
-          # 或者是完全没有签名块。上面的 rm -rf _CodeSignature 实现了完全无签名。
+          # 移除可执行文件的签名（如果存在）
+          codesign --remove-signature "Payload/${SCHEME}.app/${SCHEME}" 2>/dev/null || true
           
           # 打包
           zip -r MobileO-unsigned.ipa Payload
